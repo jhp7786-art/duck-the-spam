@@ -20,6 +20,12 @@ Why was this built? Because nothing ruins the flow of a good vibe coding session
 * **The "Drop the Hammer" Protocol:** Spammers are met with an uncompromising recorded warning followed by a ruthless, immediate `<Hangup>`. No small talk.
 * **DuckDB Blacklist:** Fast, local, serverless database logging. If a blacklisted number tries to call back, the app drops the call at the carrier level before it even rings.
 * **Legitimate Caller Fallback:** Cleared callers are politely directed to a voicemail system (perfect for Conditional Call Forwarding setups).
+## Choose Your Defense Protocol
+Because different spammers deserve different levels of psychological warfare, this application utilizes Feature Flags. You can hot-swap the punishment protocol instantly by updating the `SPAM_PROTOCOL` variable in your `.env` file. 
+
+* **`HAMMER` (Default):** Plays a legally unambiguous "lose my number" message and drops the call instantly. Highly efficient.
+* **`TODDLER`:** Weaponizes the toddler phase. Traps the caller in an infinite loop by responding to every single sentence they say with a simple, robotic: *"Why?"*
+* **`PARROT`:** The pinnacle of petty. Captures the telemarketer's exact sentence and repeats it right back to them, over and over, until they break character and hang up.
 
 ## The Tech Stack
 
