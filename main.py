@@ -1,22 +1,29 @@
 import os
 import urllib.parse
 import duckdb
+import requests 
 from fastapi import FastAPI, Form, Response
 from twilio.twiml.voice_response import VoiceResponse, Gather
 from dotenv import load_dotenv
 
-# Load environment variables
 load_dotenv()
 
-# Defaulting to JOHN so it hits your new trap immediately
+# --- CONFIGURATION ---
 SPAM_PROTOCOL = os.getenv("SPAM_PROTOCOL", "JOHN").upper() 
+DB_FILE = "duck_the_spam.db"
+SLACK_WEBHOOK_URL = os.getenv("SLACK_WEBHOOK_URL", "") 
+
+# Add the phone numbers of your family/friends here (Format: "+12345678900")
+VIP_NUMBERS = [
+    "+12566059616", 
+    "+12566099161"
+]
 
 app = FastAPI(title="Duck the Spam", description="A multi-mode automated call screener.")
 
-DB_FILE = "duck_the_spam.db"
-
 def init_db():
     conn = duckdb.connect(DB_FILE)
+    # 1. Create the table if it doesn't exist
     conn.execute("""
         CREATE TABLE IF NOT EXISTS blacklist (
             phone_number VARCHAR PRIMARY KEY,
@@ -24,15 +31,29 @@ def init_db():
             reason VARCHAR
         )
     """)
+    
+    # 2. THE ROLL-OFF: Automatically purge numbers older than 30 days
+    try:
+        conn.execute("DELETE FROM blacklist WHERE blocked_at < NOW() - INTERVAL '30 days'")
+    except Exception as e:
+        print(f"Database cleanup error: {e}")
+        
     conn.close()
 
 init_db()
 
 @app.post("/incoming-call")
 async def handle_incoming_call(From: str = Form(...)):
-    """Step 1: Database Check & Initial Interrogation."""
+    """Step 1: VIP Check, Blacklist Check, and The Henegar Services Menu."""
     response = VoiceResponse()
     
+    # 1. VIP Bypass (Family/Friends)
+    if From in VIP_NUMBERS:
+        response.say("Hey, I am currently tied up or on a ladder. Please leave a message and I will get right back to you.")
+        response.record(max_length=120, action="/voicemail-complete")
+        return Response(content=str(response), media_type="application/xml")
+
+    # 2. Blacklist Check
     conn = duckdb.connect(DB_FILE)
     result = conn.execute("SELECT 1 FROM blacklist WHERE phone_number = ?", [From]).fetchone()
     conn.close()
@@ -41,9 +62,21 @@ async def handle_incoming_call(From: str = Form(...)):
         response.reject()
         return Response(content=str(response), media_type="application/xml")
         
-    gather = Gather(input="speech", action="/process-speech", method="POST", timeout=3)
-    # Tweak the greeting slightly to encourage them to say their name
-    gather.say("Hello. You have reached an automated screening service. Please state your name and the purpose of your call.")
+    # 3. The Professional Menu
+    gather = Gather(
+        input="dtmf speech", 
+        action="/process-menu", 
+        method="POST", 
+        numDigits=1, 
+        timeout=4
+    )
+    
+    gather.say(
+        "You have reached Henegar Services. "
+        "To leave a message for Henegar Painting, press 1. "
+        "For Henegar Systems, press 2. "
+        "Otherwise, please state your name and the purpose of your call."
+    )
     response.append(gather)
     
     response.say("No input detected. Goodbye.")
@@ -51,52 +84,76 @@ async def handle_incoming_call(From: str = Form(...)):
     
     return Response(content=str(response), media_type="application/xml")
 
-@app.post("/process-speech")
-async def process_speech(From: str = Form(...), SpeechResult: str = Form(None)):
-    """Step 2: Keyword screening and Protocol Routing."""
+@app.post("/process-menu")
+async def process_menu(From: str = Form(...), Digits: str = Form(None), SpeechResult: str = Form(None)):
+    """Step 2: Route button presses or analyze speech for spam."""
     response = VoiceResponse()
     
+    # --- LEGITIMATE CLIENT ROUTING ---
+    if Digits == "1":
+        response.say("Transferring you to the voicemail for Henegar Painting. Please leave your name, number, and project details.")
+        response.record(max_length=120, action="/voicemail-complete")
+        return Response(content=str(response), media_type="application/xml")
+        
+    elif Digits == "2":
+        response.say("Transferring you to the voicemail for Henegar Systems. Please leave your name, number, and service request.")
+        response.record(max_length=120, action="/voicemail-complete")
+        return Response(content=str(response), media_type="application/xml")
+
+    # --- SPAM SCREENING ---
     if not SpeechResult:
         response.say("I did not catch that. Goodbye.")
         response.hangup()
         return Response(content=str(response), media_type="application/xml")
         
     transcript = SpeechResult.lower()
-    
-    # Financial Spammer Check
     trigger_words = ["loan", "funding", "business advance", "pre-approved", "capital", "financing"]
     
-    if any(word in transcript for word in trigger_words):
-        # Log the spammer immediately
+    if any(word in transcript for word in trigger_words) or "warranty" in transcript:
+        # Log the spammer
         conn = duckdb.connect(DB_FILE)
         try:
             conn.execute("INSERT OR IGNORE INTO blacklist (phone_number, reason) VALUES (?, ?)", 
-                         [From, f"Keyword triggered: '{SpeechResult}'"]
-            )
+                         [From, f"Caught: '{SpeechResult}'"])
         except Exception as e:
-            print(f"DB Error: {e}")
+            pass
         finally:
             conn.close()
             
-        # Route to the chosen punishment based on .env
-        if SPAM_PROTOCOL == "TODDLER":
+        if SPAM_PROTOCOL == "JOHN":
+            encoded_speech = urllib.parse.quote(SpeechResult)
+            response.redirect(f"/protocol-john?SpeechResult={encoded_speech}")
+        elif SPAM_PROTOCOL == "TODDLER":
             response.redirect("/protocol-toddler")
         elif SPAM_PROTOCOL == "PARROT":
             encoded_speech = urllib.parse.quote(SpeechResult)
             response.redirect(f"/protocol-parrot?phrase={encoded_speech}")
-        elif SPAM_PROTOCOL == "JOHN":
-            # Pass their speech to John so we can steal their name
-            encoded_speech = urllib.parse.quote(SpeechResult)
-            response.redirect(f"/protocol-john?SpeechResult={encoded_speech}")
         else:
             response.redirect("/protocol-hammer")
             
     else:
-        # Legitimate caller fallback
+        # Unknown but potentially legitimate caller who spoke instead of pressing a button
         response.say("Your call has been cleared, but the person you are trying to reach is unavailable. Please leave a message.")
         response.record(max_length=120, action="/voicemail-complete")
         
     return Response(content=str(response), media_type="application/xml")
+
+
+@app.post("/incoming-sms")
+async def incoming_sms(From: str = Form(...), Body: str = Form(...)):
+    """Phase 1: Catch incoming texts and send a push notification to Slack."""
+    
+    if SLACK_WEBHOOK_URL:
+        slack_payload = {
+            "text": f"🚨 *New Henegar Services Lead*\n*Number:* {From}\n*Message:* {Body}"
+        }
+        try:
+            requests.post(SLACK_WEBHOOK_URL, json=slack_payload)
+        except Exception as e:
+            print(f"Failed to send Slack alert: {e}")
+            
+    # Return an empty XML response so Twilio doesn't try to send an SMS reply
+    return Response(content="<Response></Response>", media_type="application/xml")
 
 
 # ==========================================
@@ -105,91 +162,57 @@ async def process_speech(From: str = Form(...), SpeechResult: str = Form(None)):
 
 @app.post("/protocol-john")
 async def protocol_john(SpeechResult: str = None):
-    """The John: UNO Reverse card on the car warranty pitch."""
     response = VoiceResponse()
-    
     caller_name = ""
     if SpeechResult:
         transcript = urllib.parse.unquote(SpeechResult).lower()
-        
-        # Quick and dirty name extraction from standard intros
         if "this is " in transcript:
             parts = transcript.split("this is ")
-            if len(parts) > 1 and parts[1].strip():
-                caller_name = parts[1].split()[0] 
+            if len(parts) > 1 and parts[1].strip(): caller_name = parts[1].split()[0] 
         elif "name is " in transcript:
             parts = transcript.split("name is ")
-            if len(parts) > 1 and parts[1].strip():
-                caller_name = parts[1].split()[0]
-    
-    # If we caught a name, use it. Otherwise, drop the name seamlessly.
+            if len(parts) > 1 and parts[1].strip(): caller_name = parts[1].split()[0]
+            
     greeting_name = f", {caller_name.capitalize()}," if caller_name else ","
-    
-    # The Trap
-    response.say(
-        f"Oh thank god{greeting_name} I am so glad we found you! We have been trying to reach you about your extended car warranty!",
-        voice="Polly.Matthew-Neural",
-        language="en-US"
-    )
-    
-    # The disrespect
-    response.say(
-        "Wonk, wonk, wonk.",
-        voice="Polly.Matthew-Neural",
-        language="en-US"
-    )
-    
+    response.say(f"Oh thank god{greeting_name} I am so glad we found you! We have been trying to reach you about your extended car warranty!", voice="Polly.Matthew-Neural", language="en-US")
+    response.say("Wonk, wonk, wonk.", voice="Polly.Matthew-Neural", language="en-US")
     response.hangup()
     return Response(content=str(response), media_type="application/xml")
 
 @app.post("/protocol-hammer")
 async def protocol_hammer():
-    """The Hammer: Stern warning and immediate disconnect."""
     response = VoiceResponse()
-    response.say("You have reached a restricted number. Your solicitation has been recorded. "
-                 "Remove this number from your dialer immediately. Goodbye."
-                 )
+    response.say("You have reached a restricted number. Remove this number from your dialer immediately. Goodbye.")
     response.hangup()
     return Response(content=str(response), media_type="application/xml")
 
 @app.post("/protocol-toddler")
 async def protocol_toddler(SpeechResult: str = Form(None)):
-    """The Toddler: Infinite loop asking 'Why?' until they rage quit."""
     response = VoiceResponse()
-    
     if not SpeechResult:
         response.say("That is what I thought. Goodbye.")
         response.hangup()
         return Response(content=str(response), media_type="application/xml")
-        
     gather = Gather(input="speech", action="/protocol-toddler", method="POST", timeout=3)
     gather.say("Why?")
     response.append(gather)
-    
     return Response(content=str(response), media_type="application/xml")
 
 @app.post("/protocol-parrot")
 async def protocol_parrot(phrase: str = None, SpeechResult: str = Form(None)):
-    """The Parrot: Echoes their exact words back at them in an infinite loop."""
     response = VoiceResponse()
-    
-    # Use the phrase passed from the URL query on the first loop, then their ongoing speech
     text_to_parrot = SpeechResult if SpeechResult else phrase
-    
     if not text_to_parrot:
         response.say("Cat got your tongue? Goodbye.")
         response.hangup()
         return Response(content=str(response), media_type="application/xml")
-        
     gather = Gather(input="speech", action="/protocol-parrot", method="POST", timeout=3)
     gather.say(text_to_parrot)
     response.append(gather)
-    
     return Response(content=str(response), media_type="application/xml")
 
 @app.post("/voicemail-complete")
 async def voicemail_complete():
-    """Ends the call gracefully after a legitimate caller leaves a voicemail."""
     response = VoiceResponse()
     response.say("Thank you. Your message has been saved. Goodbye.")
     response.hangup()
