@@ -89,15 +89,17 @@ async def process_menu(From: str = Form(...), Digits: str = Form(None), SpeechRe
     """Step 2: Route button presses or analyze speech for spam."""
     response = VoiceResponse()
     
-    # --- LEGITIMATE CLIENT ROUTING ---
+   # --- LEGITIMATE CLIENT ROUTING ---
     if Digits == "1":
         response.say("Transferring you to the voicemail for Henegar Painting. Please leave your name, number, and project details.")
-        response.record(max_length=120, action="/voicemail-complete")
+        # Notice the ?dept=paint tag added to the action URL
+        response.record(max_length=120, action="/voicemail-complete?dept=paint")
         return Response(content=str(response), media_type="application/xml")
         
     elif Digits == "2":
         response.say("Transferring you to the voicemail for Henegar Systems. Please leave your name, number, and service request.")
-        response.record(max_length=120, action="/voicemail-complete")
+        # Notice the ?dept=systems tag added to the action URL
+        response.record(max_length=120, action="/voicemail-complete?dept=systems")
         return Response(content=str(response), media_type="application/xml")
 
     # --- SPAM SCREENING ---
@@ -211,9 +213,52 @@ async def protocol_parrot(phrase: str = None, SpeechResult: str = Form(None)):
     response.append(gather)
     return Response(content=str(response), media_type="application/xml")
 
+import smtplib
+from email.message import EmailMessage
+
 @app.post("/voicemail-complete")
-async def voicemail_complete():
+async def voicemail_complete(
+    dept: str = None, 
+    From: str = Form(None), 
+    RecordingUrl: str = Form(None)
+):
+    """Catches the finished voicemail and routes the alert based on the department."""
+    
+    # 1. Route to SMS (For Paint Jobs)
+    if dept == "paint":
+        # Put your carrier's SMS gateway here (e.g., yournumber@txt.att.net for AT&T, yournumber@vtext.com for Verizon)
+        carrier_gateway = "2566059559@txt.att.net" 
+        
+        try:
+            msg = EmailMessage()
+            msg.set_content(f"New Paint Lead from {From}. Listen here: {RecordingUrl}")
+            msg['Subject'] = 'Paint Lead'
+            msg['From'] = "jhp7786@gmail.com"
+            msg['To'] = carrier_gateway
+            
+            # Send the email-to-text
+            server = smtplib.SMTP('smtp.gmail.com', 587)
+            server.starttls()
+            server.login("jhp7786@gmail.com", "SomethingEasy24!!")
+            server.send_message(msg)
+            server.quit()
+        except Exception as e:
+            print(f"Failed to send SMS Alert: {e}")
+
+    # 2. Route to Slack (For IT/Systems Jobs)
+    elif dept == "systems":
+        if SLACK_WEBHOOK_URL:
+            slack_payload = {
+                "text": f"💻 *New IT/Systems Lead*\n*Number:* {From}\n*Voicemail:* {RecordingUrl}"
+            }
+            try:
+                requests.post(SLACK_WEBHOOK_URL, json=slack_payload)
+            except Exception as e:
+                print(f"Failed to send Slack alert: {e}")
+
+    # 3. Always hang up gracefully
     response = VoiceResponse()
     response.say("Thank you. Your message has been saved. Goodbye.")
     response.hangup()
+    
     return Response(content=str(response), media_type="application/xml")
