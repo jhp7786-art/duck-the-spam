@@ -13,12 +13,15 @@ SPAM_PROTOCOL = os.getenv("SPAM_PROTOCOL", "JOHN").upper()
 DB_FILE = "duck_the_spam.db"
 SLACK_WEBHOOK_URL = os.getenv("SLACK_WEBHOOK_URL", "") 
 
-# Add the phone numbers of your family/friends here (Format: "+12345678900")
-VIP_NUMBERS = [
-    "+12566059616", 
-    "+12566099161"
-]
+# Securely loading your email and phone info
+GMAIL_ADDRESS = os.getenv("GMAIL_ADDRESS")
+GMAIL_APP_PASSWORD = os.getenv("GMAIL_APP_PASSWORD")
+CARRIER_GATEWAY = os.getenv("CARRIER_GATEWAY")
 
+# Using your environment variable for the VIP list
+VIP_NUMBERS = [
+    os.getenv("MY_REAL_PHONE_NUMBER")
+]
 app = FastAPI(title="Duck the Spam", description="A multi-mode automated call screener.")
 
 def init_db():
@@ -224,22 +227,18 @@ async def voicemail_complete(
 ):
     """Catches the finished voicemail and routes the alert based on the department."""
     
-    # 1. Route to SMS (For Paint Jobs)
+   # 1. Route to SMS (For Paint Jobs)
     if dept == "paint":
-        # Put your carrier's SMS gateway here (e.g., yournumber@txt.att.net for AT&T, yournumber@vtext.com for Verizon)
-        carrier_gateway = "2566059559@txt.att.net" 
-        
         try:
             msg = EmailMessage()
             msg.set_content(f"New Paint Lead from {From}. Listen here: {RecordingUrl}")
             msg['Subject'] = 'Paint Lead'
-            msg['From'] = "jhp7786@gmail.com"
-            msg['To'] = carrier_gateway
+            msg['From'] = GMAIL_ADDRESS
+            msg['To'] = CARRIER_GATEWAY
             
-            # Send the email-to-text
             server = smtplib.SMTP('smtp.gmail.com', 587)
             server.starttls()
-            server.login("jhp7786@gmail.com", "SomethingEasy24!!")
+            server.login(GMAIL_ADDRESS, GMAIL_APP_PASSWORD)
             server.send_message(msg)
             server.quit()
         except Exception as e:
