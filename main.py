@@ -1,6 +1,6 @@
 import os
 import urllib.parse
-import duckdb
+import psycopg2
 import requests 
 from fastapi import FastAPI, Form, Response
 from twilio.twiml.voice_response import VoiceResponse, Gather
@@ -10,8 +10,14 @@ load_dotenv()
 
 # --- CONFIGURATION ---
 SPAM_PROTOCOL = os.getenv("SPAM_PROTOCOL", "JOHN").upper() 
-DB_FILE = "duck_the_spam.db"
+DATABASE_URL = os.getenv(
+    "DATABASE_URL",
+    "postgresql://neondb_owner:npg_iX3HI1vPoMGe@ep-noisy-boat-aug3vel0.c-10.us-east-1.aws.neon.tech/neondb?sslmode=require"
+)
 SLACK_WEBHOOK_URL = os.getenv("SLACK_WEBHOOK_URL", "") 
+
+def get_db_connection():
+    return psycopg2.connect(DATABASE_URL) 
 
 # Securely loading your email and phone info
 GMAIL_ADDRESS = os.getenv("GMAIL_ADDRESS")
@@ -29,56 +35,58 @@ def read_root():
     return {"status": "Spam trap is armed and active"}
 
 def init_db():
-    conn = duckdb.connect(DB_FILE)
-    # 1. Create the table if it doesn't exist
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS blacklist (
-            phone_number VARCHAR PRIMARY KEY,
-            blocked_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            reason VARCHAR
-        )
-    """)
-    
-    # Create VIP table if it doesn't exist
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS vip (
-            phone_number VARCHAR PRIMARY KEY,
-            added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            name VARCHAR
-        )
-    """)
-
-    # Create sequence for call logs ID if it doesn't exist
-    conn.execute("CREATE SEQUENCE IF NOT EXISTS seq_call_log_id")
-    # Create call logs table if it doesn't exist
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS call_logs (
-            id INTEGER DEFAULT nextval('seq_call_log_id') PRIMARY KEY,
-            phone_number VARCHAR,
-            timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            call_type VARCHAR,
-            details VARCHAR
-        )
-    """)
-    
-    # 2. THE ROLL-OFF: Automatically purge numbers older than 30 days
+    conn = get_db_connection()
     try:
-        conn.execute("DELETE FROM blacklist WHERE blocked_at < NOW() - INTERVAL '30 days'")
+        with conn:
+            with conn.cursor() as cur:
+                # 1. Create tables if they don't exist
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS blacklist (
+                        phone_number VARCHAR PRIMARY KEY,
+                        blocked_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        reason VARCHAR
+                    )
+                """)
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS vip (
+                        phone_number VARCHAR PRIMARY KEY,
+                        added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        name VARCHAR
+                    )
+                """)
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS call_logs (
+                        id SERIAL PRIMARY KEY,
+                        phone_number VARCHAR,
+                        timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        call_type VARCHAR,
+                        details VARCHAR
+                    )
+                """)
+                
+                # 2. THE ROLL-OFF: Automatically purge numbers older than 30 days
+                try:
+                    cur.execute("DELETE FROM blacklist WHERE blocked_at < NOW() - INTERVAL '30 days'")
+                except Exception as e:
+                    print(f"Database cleanup error: {e}")
     except Exception as e:
-        print(f"Database cleanup error: {e}")
-        
-    conn.close()
+        print(f"Failed to initialize database: {e}")
+    finally:
+        conn.close()
 
 def log_call(phone_number: str, call_type: str, details: str):
+    conn = get_db_connection()
     try:
-        conn = duckdb.connect(DB_FILE)
-        conn.execute(
-            "INSERT INTO call_logs (phone_number, call_type, details) VALUES (?, ?, ?)",
-            [phone_number, call_type, details]
-        )
-        conn.close()
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO call_logs (phone_number, call_type, details) VALUES (%s, %s, %s)",
+                    (phone_number, call_type, details)
+                )
     except Exception as e:
         print(f"Failed to log call: {e}")
+    finally:
+        conn.close()
 
 init_db()
 
@@ -88,13 +96,18 @@ async def handle_incoming_call(From: str = Form(...)):
     response = VoiceResponse()
     
     # 1. VIP Bypass (Family/Friends)
-    conn = duckdb.connect(DB_FILE)
     is_vip = From in VIP_NUMBERS
     if not is_vip:
-        vip_result = conn.execute("SELECT 1 FROM vip WHERE phone_number = ?", [From]).fetchone()
-        if vip_result:
-            is_vip = True
-    conn.close()
+        conn = get_db_connection()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT 1 FROM vip WHERE phone_number = %s", (From,))
+                if cur.fetchone():
+                    is_vip = True
+        except Exception as e:
+            print(f"Error checking VIP list: {e}")
+        finally:
+            conn.close()
 
     if is_vip:
         log_call(From, "VIP Bypass", "Routed straight to voicemail")
@@ -103,9 +116,16 @@ async def handle_incoming_call(From: str = Form(...)):
         return Response(content=str(response), media_type="application/xml")
 
     # 2. Blacklist Check
-    conn = duckdb.connect(DB_FILE)
-    result = conn.execute("SELECT 1 FROM blacklist WHERE phone_number = ?", [From]).fetchone()
-    conn.close()
+    result = None
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT 1 FROM blacklist WHERE phone_number = %s", (From,))
+            result = cur.fetchone()
+    except Exception as e:
+        print(f"Error checking blacklist: {e}")
+    finally:
+        conn.close()
     
     if result:
         log_call(From, "Blocked Spammer", "Rejected call automatically")
@@ -166,12 +186,16 @@ async def process_menu(From: str = Form(...), Digits: str = Form(None), SpeechRe
     
     if any(word in transcript for word in trigger_words) or "warranty" in transcript:
         # Log the spammer
-        conn = duckdb.connect(DB_FILE)
+        conn = get_db_connection()
         try:
-            conn.execute("INSERT OR IGNORE INTO blacklist (phone_number, reason) VALUES (?, ?)", 
-                         [From, f"Caught: '{SpeechResult}'"])
+            with conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "INSERT INTO blacklist (phone_number, reason) VALUES (%s, %s) ON CONFLICT (phone_number) DO NOTHING",
+                        (From, f"Caught: '{SpeechResult}'")
+                    )
         except Exception as e:
-            pass
+            print(f"Error blacklisting spammer: {e}")
         finally:
             conn.close()
             
