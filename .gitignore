@@ -1,5 +1,22 @@
+# Environments
+venv/
+.venv/
+env/
+ENV/
 
+# Secrets
+.env
+
+# Python caching
 __pycache__/
+*.py[cod]
+*$py.class
+
+# DuckDB / SQLite databases
 *.db
 *.db.wal
-EOF
+
+# IDE settings
+.vscode/
+.idea/
+.gemini/

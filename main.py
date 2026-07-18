@@ -35,6 +35,28 @@ def init_db():
         )
     """)
     
+    # Create VIP table if it doesn't exist
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS vip (
+            phone_number VARCHAR PRIMARY KEY,
+            added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            name VARCHAR
+        )
+    """)
+
+    # Create sequence for call logs ID if it doesn't exist
+    conn.execute("CREATE SEQUENCE IF NOT EXISTS seq_call_log_id")
+    # Create call logs table if it doesn't exist
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS call_logs (
+            id INTEGER DEFAULT nextval('seq_call_log_id') PRIMARY KEY,
+            phone_number VARCHAR,
+            timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            call_type VARCHAR,
+            details VARCHAR
+        )
+    """)
+    
     # 2. THE ROLL-OFF: Automatically purge numbers older than 30 days
     try:
         conn.execute("DELETE FROM blacklist WHERE blocked_at < NOW() - INTERVAL '30 days'")
@@ -42,6 +64,17 @@ def init_db():
         print(f"Database cleanup error: {e}")
         
     conn.close()
+
+def log_call(phone_number: str, call_type: str, details: str):
+    try:
+        conn = duckdb.connect(DB_FILE)
+        conn.execute(
+            "INSERT INTO call_logs (phone_number, call_type, details) VALUES (?, ?, ?)",
+            [phone_number, call_type, details]
+        )
+        conn.close()
+    except Exception as e:
+        print(f"Failed to log call: {e}")
 
 init_db()
 
@@ -51,7 +84,16 @@ async def handle_incoming_call(From: str = Form(...)):
     response = VoiceResponse()
     
     # 1. VIP Bypass (Family/Friends)
-    if From in VIP_NUMBERS:
+    conn = duckdb.connect(DB_FILE)
+    is_vip = From in VIP_NUMBERS
+    if not is_vip:
+        vip_result = conn.execute("SELECT 1 FROM vip WHERE phone_number = ?", [From]).fetchone()
+        if vip_result:
+            is_vip = True
+    conn.close()
+
+    if is_vip:
+        log_call(From, "VIP Bypass", "Routed straight to voicemail")
         response.say("Hey, I am currently tied up or on a ladder. Please leave a message and I will get right back to you.")
         response.record(max_length=120, action="/voicemail-complete")
         return Response(content=str(response), media_type="application/xml")
@@ -62,6 +104,7 @@ async def handle_incoming_call(From: str = Form(...)):
     conn.close()
     
     if result:
+        log_call(From, "Blocked Spammer", "Rejected call automatically")
         response.reject()
         return Response(content=str(response), media_type="application/xml")
         
@@ -92,14 +135,16 @@ async def process_menu(From: str = Form(...), Digits: str = Form(None), SpeechRe
     """Step 2: Route button presses or analyze speech for spam."""
     response = VoiceResponse()
     
-   # --- LEGITIMATE CLIENT ROUTING ---
+    # --- LEGITIMATE CLIENT ROUTING ---
     if Digits == "1":
+        log_call(From, "Legitimate (Paint)", "Pressed 1 - Paint Voicemail")
         response.say("Transferring you to the voicemail for Henegar Painting. Please leave your name, number, and project details.")
         # Notice the ?dept=paint tag added to the action URL
         response.record(max_length=120, action="/voicemail-complete?dept=paint")
         return Response(content=str(response), media_type="application/xml")
         
     elif Digits == "2":
+        log_call(From, "Legitimate (Systems)", "Pressed 2 - Systems Voicemail")
         response.say("Transferring you to the voicemail for Henegar Systems. Please leave your name, number, and service request.")
         # Notice the ?dept=systems tag added to the action URL
         response.record(max_length=120, action="/voicemail-complete?dept=systems")
@@ -107,6 +152,7 @@ async def process_menu(From: str = Form(...), Digits: str = Form(None), SpeechRe
 
     # --- SPAM SCREENING ---
     if not SpeechResult:
+        log_call(From, "No Input / Timeout", "No digits pressed or speech detected")
         response.say("I did not catch that. Goodbye.")
         response.hangup()
         return Response(content=str(response), media_type="application/xml")
@@ -125,6 +171,8 @@ async def process_menu(From: str = Form(...), Digits: str = Form(None), SpeechRe
         finally:
             conn.close()
             
+        log_call(From, f"Spam ({SPAM_PROTOCOL})", f"Trigger word matched: '{SpeechResult}'")
+        
         if SPAM_PROTOCOL == "JOHN":
             encoded_speech = urllib.parse.quote(SpeechResult)
             response.redirect(f"/protocol-john?SpeechResult={encoded_speech}")
@@ -138,6 +186,7 @@ async def process_menu(From: str = Form(...), Digits: str = Form(None), SpeechRe
             
     else:
         # Unknown but potentially legitimate caller who spoke instead of pressing a button
+        log_call(From, "Unknown (Speech)", f"Spoke: '{SpeechResult}'")
         response.say("Your call has been cleared, but the person you are trying to reach is unavailable. Please leave a message.")
         response.record(max_length=120, action="/voicemail-complete")
         
