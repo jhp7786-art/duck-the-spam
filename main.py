@@ -99,7 +99,7 @@ async def handle_incoming_call(From: str = Form(...)):
     if is_vip:
         log_call(From, "VIP Bypass", "Routed straight to voicemail")
         response.say("Hey, I am currently tied up or on a ladder. Please leave a message and I will get right back to you.")
-        response.record(max_length=120, action="/voicemail-complete")
+        response.record(max_length=120, action="/voicemail-complete?dept=vip")
         return Response(content=str(response), media_type="application/xml")
 
     # 2. Blacklist Check
@@ -192,7 +192,7 @@ async def process_menu(From: str = Form(...), Digits: str = Form(None), SpeechRe
         # Unknown but potentially legitimate caller who spoke instead of pressing a button
         log_call(From, "Unknown (Speech)", f"Spoke: '{SpeechResult}'")
         response.say("Your call has been cleared, but the person you are trying to reach is unavailable. Please leave a message.")
-        response.record(max_length=120, action="/voicemail-complete")
+        response.record(max_length=120, action="/voicemail-complete?dept=cleared")
         
     return Response(content=str(response), media_type="application/xml")
 
@@ -280,12 +280,22 @@ async def voicemail_complete(
 ):
     """Catches the finished voicemail and routes the alert based on the department."""
     
-   # 1. Route to SMS (For Paint Jobs)
-    if dept == "paint":
+   # 1. Route to SMS (For Paint Jobs, VIP Bypass, and Cleared Callers)
+    if dept in ["paint", "vip", "cleared"]:
         try:
+            if dept == "vip":
+                subject = "VIP Call Alert"
+                content = f"🔴 VIP Caller {From} left a message. Listen: {RecordingUrl}"
+            elif dept == "cleared":
+                subject = "Cleared Call Alert"
+                content = f"🟢 Cleared Caller {From} left a message. Listen: {RecordingUrl}"
+            else: # paint
+                subject = "Paint Lead"
+                content = f"New Paint Lead from {From}. Listen here: {RecordingUrl}"
+
             msg = EmailMessage()
-            msg.set_content(f"New Paint Lead from {From}. Listen here: {RecordingUrl}")
-            msg['Subject'] = 'Paint Lead'
+            msg.set_content(content)
+            msg['Subject'] = subject
             msg['From'] = GMAIL_ADDRESS
             msg['To'] = CARRIER_GATEWAY
             
