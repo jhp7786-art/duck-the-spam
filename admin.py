@@ -64,6 +64,17 @@ def ensure_db():
                         details VARCHAR
                     )
                 """)
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS app_settings (
+                        key VARCHAR PRIMARY KEY,
+                        value VARCHAR
+                    )
+                """)
+                cur.execute("""
+                    INSERT INTO app_settings (key, value)
+                    VALUES ('spam_protocol', 'JOHN')
+                    ON CONFLICT (key) DO NOTHING
+                """)
     finally:
         conn.close()
 
@@ -79,8 +90,20 @@ st.markdown("---")
 # ==========================================
 st.header("🛡️ Active Spam Defense Protocol")
 
-# Read current mode from .env, default to JOHN
-current_mode = os.getenv("SPAM_PROTOCOL", "JOHN").upper()
+# Read current mode from database, default to JOHN
+current_mode = "JOHN"
+try:
+    conn = get_db_connection()
+    with conn.cursor() as cur:
+        cur.execute("SELECT value FROM app_settings WHERE key = 'spam_protocol'")
+        row = cur.fetchone()
+        if row:
+            current_mode = row[0].upper()
+except Exception as e:
+    st.error(f"Error loading active protocol from database: {e}")
+finally:
+    if 'conn' in locals() and conn:
+        conn.close()
 
 modes = {
     "JOHN": {
@@ -98,6 +121,10 @@ modes = {
     "HAMMER": {
         "title": "🔨 The Hammer",
         "desc": "A stern, no-nonsense warning informing the solicitor that their number has been logged and blacklisted, followed by an immediate disconnect."
+    },
+    "SHUFFLE": {
+        "title": "🔀 The Shuffle (Random)",
+        "desc": "Keeps solicitors off-balance by randomly picking a different defense protocol (John, Toddler, Parrot, or Hammer) for each screened spam call."
     }
 }
 
@@ -115,10 +142,17 @@ selected_key = st.selectbox(
 # Display description for Loom walkthrough
 st.info(modes[selected_key]["desc"])
 
-# Save button to update .env on the fly
+# Save button to update settings in database
 if st.button("Apply Selected Protocol"):
-    set_key(ENV_FILE, "SPAM_PROTOCOL", selected_key)
-    st.success(f"Successfully switched to {modes[selected_key]['title']}! (FastAPI will reload automatically)")
+    try:
+        db_execute(
+            "INSERT INTO app_settings (key, value) VALUES ('spam_protocol', %s) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
+            (selected_key,)
+        )
+        st.success(f"Successfully switched to {modes[selected_key]['title']}! Changes applied instantly across all systems.")
+        st.rerun()
+    except Exception as e:
+        st.error(f"Failed to apply protocol: {e}")
 
 st.markdown("---")
 

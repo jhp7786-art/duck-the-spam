@@ -1,4 +1,5 @@
 import os
+import random
 import urllib.parse
 import psycopg2
 import requests 
@@ -9,7 +10,6 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # --- CONFIGURATION ---
-SPAM_PROTOCOL = os.getenv("SPAM_PROTOCOL", "JOHN").upper() 
 DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
     raise ValueError("DATABASE_URL environment variable is not set. Please define it in your environment or .env file.")
@@ -17,6 +17,25 @@ SLACK_WEBHOOK_URL = os.getenv("SLACK_WEBHOOK_URL", "")
 
 def get_db_connection():
     return psycopg2.connect(DATABASE_URL) 
+
+def get_active_protocol():
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT value FROM app_settings WHERE key = 'spam_protocol'")
+            row = cur.fetchone()
+            mode = row[0].upper() if row else "JOHN"
+            
+            if mode == "SHUFFLE":
+                chosen = random.choice(["JOHN", "TODDLER", "PARROT", "HAMMER"])
+                print(f"[SHUFFLE] Dynamically selected protocol: {chosen}")
+                return chosen
+            return mode
+    except Exception as e:
+        print(f"Error reading active protocol: {e}")
+        return "JOHN"
+    finally:
+        conn.close() 
 
 # Securely loading your email and phone info
 GMAIL_ADDRESS = os.getenv("GMAIL_ADDRESS")
@@ -61,6 +80,17 @@ def init_db():
                         call_type VARCHAR,
                         details VARCHAR
                     )
+                """)
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS app_settings (
+                        key VARCHAR PRIMARY KEY,
+                        value VARCHAR
+                    )
+                """)
+                cur.execute("""
+                    INSERT INTO app_settings (key, value)
+                    VALUES ('spam_protocol', 'JOHN')
+                    ON CONFLICT (key) DO NOTHING
                 """)
                 
                 # 2. THE ROLL-OFF: Automatically purge numbers older than 30 days
@@ -198,14 +228,15 @@ async def process_menu(From: str = Form(...), Digits: str = Form(None), SpeechRe
         finally:
             conn.close()
             
-        log_call(From, f"Spam ({SPAM_PROTOCOL})", f"Trigger word matched: '{SpeechResult}'")
+        active_protocol = get_active_protocol()
+        log_call(From, f"Spam ({active_protocol})", f"Trigger word matched: '{SpeechResult}'")
         
-        if SPAM_PROTOCOL == "JOHN":
+        if active_protocol == "JOHN":
             encoded_speech = urllib.parse.quote(SpeechResult)
             response.redirect(f"/protocol-john?SpeechResult={encoded_speech}")
-        elif SPAM_PROTOCOL == "TODDLER":
+        elif active_protocol == "TODDLER":
             response.redirect("/protocol-toddler")
-        elif SPAM_PROTOCOL == "PARROT":
+        elif active_protocol == "PARROT":
             encoded_speech = urllib.parse.quote(SpeechResult)
             response.redirect(f"/protocol-parrot?phrase={encoded_speech}")
         else:
