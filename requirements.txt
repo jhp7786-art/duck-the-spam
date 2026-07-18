@@ -1,8 +1,8 @@
 fastapi
 uvicorn
 twilio
-duckdb
 python-dotenv
 python-multipart
 streamlit
 pandas
+psycopg2-binary

@@ -1,41 +1,71 @@
 import streamlit as st
-import duckdb
+import psycopg2
+import pandas as pd
 import os
 from dotenv import load_dotenv, set_key
 
 # Load environment variables
 load_dotenv()
-DB_FILE = "duck_the_spam.db"
+DATABASE_URL = os.getenv("DATABASE_URL")
+if not DATABASE_URL:
+    st.error("DATABASE_URL environment variable is not set. Please define it in your .env file or environment.")
+    st.stop()
 ENV_FILE = ".env"
+
+def get_db_connection():
+    return psycopg2.connect(DATABASE_URL)
+
+def db_execute(query, params=None):
+    conn = get_db_connection()
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(query, params)
+    finally:
+        conn.close()
+
+def fetch_dataframe(query, params=None):
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(query, params)
+            columns = [desc[0] for desc in cur.description]
+            data = cur.fetchall()
+            return pd.DataFrame(data, columns=columns)
+    finally:
+        conn.close()
 
 # Initialize DB structure in Streamlit as well to prevent catalog exceptions
 def ensure_db():
-    conn = duckdb.connect(DB_FILE)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS blacklist (
-            phone_number VARCHAR PRIMARY KEY,
-            blocked_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            reason VARCHAR
-        )
-    """)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS vip (
-            phone_number VARCHAR PRIMARY KEY,
-            added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            name VARCHAR
-        )
-    """)
-    conn.execute("CREATE SEQUENCE IF NOT EXISTS seq_call_log_id")
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS call_logs (
-            id INTEGER DEFAULT nextval('seq_call_log_id') PRIMARY KEY,
-            phone_number VARCHAR,
-            timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            call_type VARCHAR,
-            details VARCHAR
-        )
-    """)
-    conn.close()
+    conn = get_db_connection()
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS blacklist (
+                        phone_number VARCHAR PRIMARY KEY,
+                        blocked_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        reason VARCHAR
+                    )
+                """)
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS vip (
+                        phone_number VARCHAR PRIMARY KEY,
+                        added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        name VARCHAR
+                    )
+                """)
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS call_logs (
+                        id SERIAL PRIMARY KEY,
+                        phone_number VARCHAR,
+                        timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        call_type VARCHAR,
+                        details VARCHAR
+                    )
+                """)
+    finally:
+        conn.close()
 
 ensure_db()
 
@@ -106,11 +136,9 @@ with tab_logs:
     st.write("Click any row in the log below to view caller history and take quick actions.")
     
     try:
-        conn = duckdb.connect(DB_FILE)
-        call_logs = conn.execute(
+        call_logs = fetch_dataframe(
             "SELECT id, phone_number, timestamp, call_type, details FROM call_logs ORDER BY timestamp DESC LIMIT 50"
-        ).fetch_df()
-        conn.close()
+        )
         
         if not call_logs.empty:
             # Interactive Dataframe with Row Selection
@@ -130,10 +158,15 @@ with tab_logs:
                 st.markdown(f"### ⚡ Quick Actions for: `{selected_phone}`")
                 
                 # Check status
-                conn = duckdb.connect(DB_FILE)
-                is_vip = conn.execute("SELECT name FROM vip WHERE phone_number = ?", [selected_phone]).fetchone()
-                is_blocked = conn.execute("SELECT reason FROM blacklist WHERE phone_number = ?", [selected_phone]).fetchone()
-                conn.close()
+                conn = get_db_connection()
+                try:
+                    with conn.cursor() as cur:
+                        cur.execute("SELECT name FROM vip WHERE phone_number = %s", (selected_phone,))
+                        is_vip = cur.fetchone()
+                        cur.execute("SELECT reason FROM blacklist WHERE phone_number = %s", (selected_phone,))
+                        is_blocked = cur.fetchone()
+                finally:
+                    conn.close()
                 
                 col_act1, col_act2 = st.columns(2)
                 
@@ -141,20 +174,16 @@ with tab_logs:
                     if is_vip:
                         st.info(f"🔑 This number is in your VIP list (as '{is_vip[0]}').")
                         if st.button("Remove from VIP List", key="remove_vip_from_logs"):
-                            conn = duckdb.connect(DB_FILE)
-                            conn.execute("DELETE FROM vip WHERE phone_number = ?", [selected_phone])
-                            conn.close()
+                            db_execute("DELETE FROM vip WHERE phone_number = %s", (selected_phone,))
                             st.success(f"Removed {selected_phone} from VIP list.")
                             st.rerun()
                     else:
                         st.write("**Add to VIP List**")
                         vip_name_input = st.text_input("Contact Name (e.g. John Doe):", value="Unnamed VIP", key="vip_name_from_logs")
                         if st.button("Add to VIP List", key="add_vip_from_logs"):
-                            conn = duckdb.connect(DB_FILE)
                             # Remove from blacklist first if it exists there
-                            conn.execute("DELETE FROM blacklist WHERE phone_number = ?", [selected_phone])
-                            conn.execute("INSERT OR IGNORE INTO vip (phone_number, name) VALUES (?, ?)", [selected_phone, vip_name_input])
-                            conn.close()
+                            db_execute("DELETE FROM blacklist WHERE phone_number = %s", (selected_phone,))
+                            db_execute("INSERT INTO vip (phone_number, name) VALUES (%s, %s) ON CONFLICT (phone_number) DO NOTHING", (selected_phone, vip_name_input))
                             st.success(f"Added {selected_phone} to VIP List!")
                             st.rerun()
                             
@@ -162,20 +191,16 @@ with tab_logs:
                     if is_blocked:
                         st.info(f"🚫 This number is blocked (Reason: '{is_blocked[0]}').")
                         if st.button("Forgive Caller (Unban)", key="unban_from_logs"):
-                            conn = duckdb.connect(DB_FILE)
-                            conn.execute("DELETE FROM blacklist WHERE phone_number = ?", [selected_phone])
-                            conn.close()
+                            db_execute("DELETE FROM blacklist WHERE phone_number = %s", (selected_phone,))
                             st.success(f"Removed {selected_phone} from blacklist.")
                             st.rerun()
                     else:
                         st.write("**Block Caller**")
                         block_reason_input = st.text_input("Reason for block (e.g. Loan Spam):", value="Manual Block", key="block_reason_from_logs")
                         if st.button("Block Number", key="block_from_logs"):
-                            conn = duckdb.connect(DB_FILE)
                             # Remove from VIP first if it exists there
-                            conn.execute("DELETE FROM vip WHERE phone_number = ?", [selected_phone])
-                            conn.execute("INSERT OR IGNORE INTO blacklist (phone_number, reason) VALUES (?, ?)", [selected_phone, block_reason_input])
-                            conn.close()
+                            db_execute("DELETE FROM vip WHERE phone_number = %s", (selected_phone,))
+                            db_execute("INSERT INTO blacklist (phone_number, reason) VALUES (%s, %s) ON CONFLICT (phone_number) DO NOTHING", (selected_phone, block_reason_input))
                             st.success(f"Blocked {selected_phone}!")
                             st.rerun()
         else:
@@ -197,27 +222,22 @@ with tab_vip:
         
     if st.button("Add to VIP List", key="add_vip_manual"):
         if new_vip_number.strip():
-            conn = duckdb.connect(DB_FILE)
             try:
                 # Remove from blacklist first if there
-                conn.execute("DELETE FROM blacklist WHERE phone_number = ?", [new_vip_number.strip()])
-                conn.execute("INSERT OR IGNORE INTO vip (phone_number, name) VALUES (?, ?)", 
-                             [new_vip_number.strip(), new_vip_name.strip() or "Unnamed VIP"])
+                db_execute("DELETE FROM blacklist WHERE phone_number = %s", (new_vip_number.strip(),))
+                db_execute("INSERT INTO vip (phone_number, name) VALUES (%s, %s) ON CONFLICT (phone_number) DO NOTHING", 
+                             (new_vip_number.strip(), new_vip_name.strip() or "Unnamed VIP"))
                 st.success(f"Added {new_vip_number.strip()} to the VIP List!")
                 st.rerun()
             except Exception as e:
                 st.error(f"Error adding VIP: {e}")
-            finally:
-                conn.close()
         else:
             st.error("Phone number is required.")
             
     st.subheader("Current VIP Contacts")
     # Load and show current VIP list
     try:
-        conn = duckdb.connect(DB_FILE)
-        vip_data = conn.execute("SELECT phone_number, name, added_at FROM vip ORDER BY added_at DESC").fetch_df()
-        conn.close()
+        vip_data = fetch_dataframe("SELECT phone_number, name, added_at FROM vip ORDER BY added_at DESC")
         
         if not vip_data.empty:
             event_vip = st.dataframe(
@@ -239,20 +259,22 @@ with tab_vip:
             vip_col1, vip_col2 = st.columns(2)
             with vip_col1:
                 if st.button("Remove VIP", key="remove_vip_btn"):
-                    conn = duckdb.connect(DB_FILE)
-                    conn.execute("DELETE FROM vip WHERE phone_number = ?", [vip_to_remove])
-                    conn.close()
+                    db_execute("DELETE FROM vip WHERE phone_number = %s", (vip_to_remove,))
                     st.success(f"Removed {vip_to_remove} from the VIP List.")
                     st.rerun()
             with vip_col2:
                 if st.button("Block (Move to Blacklist)", key="demote_vip_btn"):
-                    conn = duckdb.connect(DB_FILE)
                     # Get VIP name to use as reason
-                    v_name = conn.execute("SELECT name FROM vip WHERE phone_number = ?", [vip_to_remove]).fetchone()
+                    conn = get_db_connection()
+                    try:
+                        with conn.cursor() as cur:
+                            cur.execute("SELECT name FROM vip WHERE phone_number = %s", (vip_to_remove,))
+                            v_name = cur.fetchone()
+                    finally:
+                        conn.close()
                     reason = f"Demoted from VIP: {v_name[0] if v_name else 'Unnamed'}"
-                    conn.execute("DELETE FROM vip WHERE phone_number = ?", [vip_to_remove])
-                    conn.execute("INSERT OR IGNORE INTO blacklist (phone_number, reason) VALUES (?, ?)", [vip_to_remove, reason])
-                    conn.close()
+                    db_execute("DELETE FROM vip WHERE phone_number = %s", (vip_to_remove,))
+                    db_execute("INSERT INTO blacklist (phone_number, reason) VALUES (%s, %s) ON CONFLICT (phone_number) DO NOTHING", (vip_to_remove, reason))
                     st.success(f"Demoted {vip_to_remove} to Blacklist.")
                     st.rerun()
         else:
@@ -274,26 +296,21 @@ with tab_blacklist:
         
     if st.button("Add to Blacklist", key="add_blacklist_manual"):
         if new_block_number.strip():
-            conn = duckdb.connect(DB_FILE)
             try:
                 # Remove from VIP first if there
-                conn.execute("DELETE FROM vip WHERE phone_number = ?", [new_block_number.strip()])
-                conn.execute("INSERT OR IGNORE INTO blacklist (phone_number, reason) VALUES (?, ?)", 
-                             [new_block_number.strip(), new_block_reason.strip() or "Manual Block"])
+                db_execute("DELETE FROM vip WHERE phone_number = %s", (new_block_number.strip(),))
+                db_execute("INSERT INTO blacklist (phone_number, reason) VALUES (%s, %s) ON CONFLICT (phone_number) DO NOTHING", 
+                             (new_block_number.strip(), new_block_reason.strip() or "Manual Block"))
                 st.success(f"Blocked {new_block_number.strip()}!")
                 st.rerun()
             except Exception as e:
                 st.error(f"Error blocking number: {e}")
-            finally:
-                conn.close()
         else:
             st.error("Phone number is required.")
             
     st.subheader("Currently Blacklisted Numbers")
     try:
-        conn = duckdb.connect(DB_FILE)
-        blacklist_data = conn.execute("SELECT phone_number, blocked_at, reason FROM blacklist ORDER BY blocked_at DESC").fetch_df()
-        conn.close()
+        blacklist_data = fetch_dataframe("SELECT phone_number, blocked_at, reason FROM blacklist ORDER BY blocked_at DESC")
         
         if not blacklist_data.empty:
             event_bl = st.dataframe(
@@ -315,19 +332,15 @@ with tab_blacklist:
             bl_col1, bl_col2 = st.columns(2)
             with bl_col1:
                 if st.button("Forgive Caller", key="unban_bl_btn"):
-                    conn = duckdb.connect(DB_FILE)
-                    conn.execute("DELETE FROM blacklist WHERE phone_number = ?", [phone_to_remove])
-                    conn.close()
+                    db_execute("DELETE FROM blacklist WHERE phone_number = %s", (phone_to_remove,))
                     st.success(f"Purged {phone_to_remove} from the blacklist.")
                     st.rerun()
             with bl_col2:
                 # Ask for name to promote to VIP
                 promote_name = st.text_input("Name to Promote to VIP:", value="Promoted Spammer", key="promote_name_input")
                 if st.button("Forgive & Move to VIP", key="promote_bl_btn"):
-                    conn = duckdb.connect(DB_FILE)
-                    conn.execute("DELETE FROM blacklist WHERE phone_number = ?", [phone_to_remove])
-                    conn.execute("INSERT OR IGNORE INTO vip (phone_number, name) VALUES (?, ?)", [phone_to_remove, promote_name])
-                    conn.close()
+                    db_execute("DELETE FROM blacklist WHERE phone_number = %s", (phone_to_remove,))
+                    db_execute("INSERT INTO vip (phone_number, name) VALUES (%s, %s) ON CONFLICT (phone_number) DO NOTHING", (phone_to_remove, promote_name))
                     st.success(f"Promoted {phone_to_remove} to VIP List as '{promote_name}'.")
                     st.rerun()
         else:

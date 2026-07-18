@@ -27,10 +27,10 @@ When a telemarketer or robocaller ignores your business menu, the bouncer takes 
 ## 🛠️ Tech Stack & Features
 - **FastAPI Backend:** Lightweight, asynchronous web routing for Twilio Webhooks.
 - **Twilio Voice API:** High-fidelity speech recognition and Neural Text-to-Speech (TTS).
-- **DuckDB:** Embedded database to store spammer numbers and log call interactions.
-- **Streamlit Dashboard:** Local UI for configuring settings, purging the blacklist, and checking call records on the fly.
+- **PostgreSQL (Neon):** Centralized cloud database storing blocker lists, VIP whitelist, and call logs.
+- **Streamlit Dashboard:** Command center UI for configuring settings, managing the VIP/blacklist, and checking call records on the fly.
 - **VIP Bypass:** Whitelists family and friends to skip automated menus and route straight to custom voicemail boxes.
-- 
+
 ---
 
 ## 💼 Contractor & Small Business Solutions
@@ -51,3 +51,15 @@ A complete front-office replacement for busy solo operators.
 * **Professional IVR Front Desk:** A custom greeting routing clients (e.g., "Press 1 for Estimates, Press 2 for Billing").
 * **Instant Native SMS Alerts:** When a real client clears the menu and leaves a lead, the system uses carrier gateways to instantly text your personal phone with their number and what they called about—bypassing telecom restrictions.
 * **Voicemail-to-Email Drops:** End of the day? All your leads and their audio files are perfectly organized in your email inbox ready for quoting.
+
+---
+
+## 🌐 Distributed Cloud Architecture
+
+"Duck the Spam" is structured as a distributed microservice setup:
+
+* **Centralized Ledger (Neon PostgreSQL):** The system uses a hosted Neon PostgreSQL database as its single source of truth for whitelisting, blacklisting, and call tracking.
+* **Independent Render Services:**
+  * **FastAPI Backend (Bouncer):** Runs as a Render Web Service to receive real-time webhook calls from Twilio, check caller privileges, run defense traps, and log actions.
+  * **Streamlit Admin Dashboard:** Runs as a separate Render Web Service to allow real-time control, blacklist management, and quick whitelisting.
+* **Dynamic Real-Time Synced State:** Whitelisting a number or blocking a caller on the dashboard takes effect instantly on the call bouncer, without any database replication lag or file locking issues.
