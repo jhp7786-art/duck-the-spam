@@ -24,6 +24,10 @@ VIP_NUMBERS = [
 ]
 app = FastAPI(title="Duck the Spam", description="A multi-mode automated call screener.")
 
+@app.get("/")
+def read_root():
+    return {"status": "Spam trap is armed and active"}
+
 def init_db():
     conn = duckdb.connect(DB_FILE)
     # 1. Create the table if it doesn't exist
