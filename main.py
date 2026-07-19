@@ -72,6 +72,7 @@ def init_db():
                         name VARCHAR
                     )
                 """)
+                cur.execute("ALTER TABLE vip ADD COLUMN IF NOT EXISTS custom_greeting VARCHAR;")
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS call_logs (
                         id SERIAL PRIMARY KEY,
@@ -125,22 +126,40 @@ async def handle_incoming_call(From: str = Form(...)):
     response = VoiceResponse()
     
     # 1. VIP Bypass (Family/Friends)
-    is_vip = From in VIP_NUMBERS
-    if not is_vip:
-        conn = get_db_connection()
-        try:
-            with conn.cursor() as cur:
-                cur.execute("SELECT 1 FROM vip WHERE phone_number = %s", (From,))
-                if cur.fetchone():
-                    is_vip = True
-        except Exception as e:
-            print(f"Error checking VIP list: {e}")
-        finally:
-            conn.close()
+    is_vip = False
+    vip_name = None
+    custom_greeting = None
+    
+    if From in VIP_NUMBERS:
+        is_vip = True
+        vip_name = "Jeffery"
+
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT name, custom_greeting FROM vip WHERE phone_number = %s", (From,))
+            row = cur.fetchone()
+            if row:
+                is_vip = True
+                vip_name = row[0]
+                custom_greeting = row[1]
+    except Exception as e:
+        print(f"Error checking VIP list: {e}")
+    finally:
+        conn.close()
 
     if is_vip:
         log_call(From, "VIP Bypass", "Routed straight to voicemail")
-        response.say("Hey, I am currently tied up or on a ladder. Please leave a message and I will get right back to you.")
+        
+        # Determine the greeting message dynamically
+        if custom_greeting and custom_greeting.strip():
+            greeting_text = custom_greeting.strip()
+        elif vip_name and vip_name.strip():
+            greeting_text = f"Hey {vip_name.strip()}, I am currently tied up or on a ladder. Please leave a message and I will get right back to you."
+        else:
+            greeting_text = "Hey, I am currently tied up or on a ladder. Please leave a message and I will get right back to you."
+            
+        response.say(greeting_text)
         response.record(max_length=120, action="/voicemail-complete?dept=vip")
         return Response(content=str(response), media_type="application/xml")
 

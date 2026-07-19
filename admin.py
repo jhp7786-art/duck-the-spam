@@ -55,6 +55,7 @@ def ensure_db():
                         name VARCHAR
                     )
                 """)
+                cur.execute("ALTER TABLE vip ADD COLUMN IF NOT EXISTS custom_greeting VARCHAR;")
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS call_logs (
                         id SERIAL PRIMARY KEY,
@@ -214,10 +215,11 @@ with tab_logs:
                     else:
                         st.write("**Add to VIP List**")
                         vip_name_input = st.text_input("Contact Name (e.g. John Doe):", value="Unnamed VIP", key="vip_name_from_logs")
+                        vip_greeting_input = st.text_input("Custom Greeting (Optional):", placeholder="e.g. Welcome Bob!", key="vip_greeting_from_logs")
                         if st.button("Add to VIP List", key="add_vip_from_logs"):
                             # Remove from blacklist first if it exists there
                             db_execute("DELETE FROM blacklist WHERE phone_number = %s", (selected_phone,))
-                            db_execute("INSERT INTO vip (phone_number, name) VALUES (%s, %s) ON CONFLICT (phone_number) DO NOTHING", (selected_phone, vip_name_input))
+                            db_execute("INSERT INTO vip (phone_number, name, custom_greeting) VALUES (%s, %s, %s) ON CONFLICT (phone_number) DO UPDATE SET name = EXCLUDED.name, custom_greeting = EXCLUDED.custom_greeting", (selected_phone, vip_name_input, vip_greeting_input.strip() or None))
                             st.success(f"Added {selected_phone} to VIP List!")
                             st.rerun()
                             
@@ -248,19 +250,21 @@ with tab_vip:
     
     # VIP Form to add new number manually
     st.subheader("Add Contact Manually")
-    manual_col1, manual_col2 = st.columns(2)
+    manual_col1, manual_col2, manual_col3 = st.columns(3)
     with manual_col1:
         new_vip_name = st.text_input("Contact Name (e.g. John Doe):", key="vip_name_input")
     with manual_col2:
         new_vip_number = st.text_input("VIP Phone Number (Format: +1256...):", key="vip_num_input")
+    with manual_col3:
+        new_vip_greeting = st.text_input("Custom Greeting (Optional):", placeholder="e.g. Welcome Bob!", key="vip_greeting_input")
         
     if st.button("Add to VIP List", key="add_vip_manual"):
         if new_vip_number.strip():
             try:
                 # Remove from blacklist first if there
                 db_execute("DELETE FROM blacklist WHERE phone_number = %s", (new_vip_number.strip(),))
-                db_execute("INSERT INTO vip (phone_number, name) VALUES (%s, %s) ON CONFLICT (phone_number) DO NOTHING", 
-                             (new_vip_number.strip(), new_vip_name.strip() or "Unnamed VIP"))
+                db_execute("INSERT INTO vip (phone_number, name, custom_greeting) VALUES (%s, %s, %s) ON CONFLICT (phone_number) DO UPDATE SET name = EXCLUDED.name, custom_greeting = EXCLUDED.custom_greeting", 
+                             (new_vip_number.strip(), new_vip_name.strip() or "Unnamed VIP", new_vip_greeting.strip() or None))
                 st.success(f"Added {new_vip_number.strip()} to the VIP List!")
                 st.rerun()
             except Exception as e:
@@ -271,7 +275,7 @@ with tab_vip:
     st.subheader("Current VIP Contacts")
     # Load and show current VIP list
     try:
-        vip_data = fetch_dataframe("SELECT phone_number, name, added_at FROM vip ORDER BY added_at DESC")
+        vip_data = fetch_dataframe("SELECT phone_number, name, custom_greeting, added_at FROM vip ORDER BY added_at DESC")
         
         if not vip_data.empty:
             event_vip = st.dataframe(
@@ -372,9 +376,10 @@ with tab_blacklist:
             with bl_col2:
                 # Ask for name to promote to VIP
                 promote_name = st.text_input("Name to Promote to VIP:", value="Promoted Spammer", key="promote_name_input")
+                promote_greeting = st.text_input("Custom Greeting (Optional):", key="promote_greeting_input")
                 if st.button("Forgive & Move to VIP", key="promote_bl_btn"):
                     db_execute("DELETE FROM blacklist WHERE phone_number = %s", (phone_to_remove,))
-                    db_execute("INSERT INTO vip (phone_number, name) VALUES (%s, %s) ON CONFLICT (phone_number) DO NOTHING", (phone_to_remove, promote_name))
+                    db_execute("INSERT INTO vip (phone_number, name, custom_greeting) VALUES (%s, %s, %s) ON CONFLICT (phone_number) DO UPDATE SET name = EXCLUDED.name, custom_greeting = EXCLUDED.custom_greeting", (phone_to_remove, promote_name, promote_greeting.strip() or None))
                     st.success(f"Promoted {phone_to_remove} to VIP List as '{promote_name}'.")
                     st.rerun()
         else:
