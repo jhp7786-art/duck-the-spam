@@ -6,6 +6,7 @@ import requests
 from fastapi import FastAPI, Form, Response
 from twilio.twiml.voice_response import VoiceResponse, Gather
 from dotenv import load_dotenv
+from pydantic import BaseModel
 
 load_dotenv()
 
@@ -14,6 +15,7 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
     raise ValueError("DATABASE_URL environment variable is not set. Please define it in your environment or .env file.")
 SLACK_WEBHOOK_URL = os.getenv("SLACK_WEBHOOK_URL", "") 
+COMPANY_NAME = os.getenv("COMPANY_NAME", "New Life Appliance Repair")
 
 def get_db_connection():
     return psycopg2.connect(DATABASE_URL) 
@@ -37,20 +39,25 @@ def get_active_protocol():
     finally:
         conn.close() 
 
-# Securely loading your email and phone info
+# Securely loading email and phone info
 GMAIL_ADDRESS = os.getenv("GMAIL_ADDRESS")
 GMAIL_APP_PASSWORD = os.getenv("GMAIL_APP_PASSWORD")
 CARRIER_GATEWAY = os.getenv("CARRIER_GATEWAY")
 
-# Using your environment variable for the VIP list
+# Using environment variable for VIP list
 VIP_NUMBERS = [
     os.getenv("MY_REAL_PHONE_NUMBER")
 ]
-app = FastAPI(title="Duck the Spam", description="A multi-mode automated call screener.")
+app = FastAPI(title=f"{COMPANY_NAME} Dispatch System", description="Automated client dispatch and call screening service.")
+
+class LeadPayload(BaseModel):
+    phone: str
+    appliance: str
+    issue: str
 
 @app.get("/")
 def read_root():
-    return {"status": "Spam trap is armed and active"}
+    return {"status": f"{COMPANY_NAME} dispatch system is active"}
 
 def init_db():
     conn = get_db_connection()
@@ -93,6 +100,16 @@ def init_db():
                     VALUES ('spam_protocol', 'JOHN')
                     ON CONFLICT (key) DO NOTHING
                 """)
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS leads (
+                        id SERIAL PRIMARY KEY,
+                        phone VARCHAR,
+                        appliance VARCHAR,
+                        issue VARCHAR,
+                        status VARCHAR DEFAULT 'Awaiting Booking',
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                """)
                 
                 # 2. THE ROLL-OFF: Automatically purge numbers older than 30 days
                 try:
@@ -120,9 +137,30 @@ def log_call(phone_number: str, call_type: str, details: str):
 
 init_db()
 
+@app.post("/log-lead")
+async def log_lead(payload: LeadPayload):
+    """Accepts JSON webhooks from Twilio Studio and logs incoming leads into PostgreSQL."""
+    conn = get_db_connection()
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO leads (phone, appliance, issue, status)
+                    VALUES (%s, %s, %s, %s)
+                    """,
+                    (payload.phone, payload.appliance, payload.issue, "Awaiting Booking")
+                )
+        return {"status": "success", "message": "Lead logged successfully"}
+    except Exception as e:
+        print(f"Failed to log lead: {e}")
+        return {"status": "error", "message": str(e)}
+    finally:
+        conn.close()
+
 @app.post("/incoming-call")
 async def handle_incoming_call(From: str = Form(...)):
-    """Step 1: VIP Check, Blacklist Check, and The Henegar Services Menu."""
+    """Step 1: VIP Check, Blacklist Check, and Call Screening."""
     response = VoiceResponse()
     
     # 1. VIP Bypass (Family/Friends)
@@ -155,9 +193,9 @@ async def handle_incoming_call(From: str = Form(...)):
         if custom_greeting and custom_greeting.strip():
             greeting_text = custom_greeting.strip()
         elif vip_name and vip_name.strip():
-            greeting_text = f"Hey {vip_name.strip()}, I am currently tied up or on a ladder. Please leave a message and I will get right back to you."
+            greeting_text = f"Hey {vip_name.strip()}, thanks for calling {COMPANY_NAME}. I am currently unavailable. Please leave a message and I will get right back to you."
         else:
-            greeting_text = "Hey, I am currently tied up or on a ladder. Please leave a message and I will get right back to you."
+            greeting_text = f"Hey, thanks for calling {COMPANY_NAME}. I am currently unavailable. Please leave a message and I will get right back to you."
             
         response.say(greeting_text)
         response.record(max_length=120, action="/voicemail-complete?dept=vip")
@@ -180,7 +218,7 @@ async def handle_incoming_call(From: str = Form(...)):
         response.reject()
         return Response(content=str(response), media_type="application/xml")
         
-    # 3. The Professional Menu
+    # 3. Call Screening Prompt
     gather = Gather(
         input="dtmf speech", 
         action="/process-menu", 
@@ -190,10 +228,8 @@ async def handle_incoming_call(From: str = Form(...)):
     )
     
     gather.say(
-        "You have reached Henegar Services. "
-        "To leave a message for Henegar Painting, press 1. "
-        "For Henegar Systems, press 2. "
-        "Otherwise, please state your name and the purpose of your call."
+        f"You have reached {COMPANY_NAME}. "
+        "Please state your name and the purpose of your call."
     )
     response.append(gather)
     
@@ -204,27 +240,12 @@ async def handle_incoming_call(From: str = Form(...)):
 
 @app.post("/process-menu")
 async def process_menu(From: str = Form(...), Digits: str = Form(None), SpeechResult: str = Form(None)):
-    """Step 2: Route button presses or analyze speech for spam."""
+    """Step 2: Analyze speech for spam or route cleared callers."""
     response = VoiceResponse()
-    
-    # --- LEGITIMATE CLIENT ROUTING ---
-    if Digits == "1":
-        log_call(From, "Legitimate (Paint)", "Pressed 1 - Paint Voicemail")
-        response.say("Transferring you to the voicemail for Henegar Painting. Please leave your name, number, and project details.")
-        # Notice the ?dept=paint tag added to the action URL
-        response.record(max_length=120, action="/voicemail-complete?dept=paint")
-        return Response(content=str(response), media_type="application/xml")
-        
-    elif Digits == "2":
-        log_call(From, "Legitimate (Systems)", "Pressed 2 - Systems Voicemail")
-        response.say("Transferring you to the voicemail for Henegar Systems. Please leave your name, number, and service request.")
-        # Notice the ?dept=systems tag added to the action URL
-        response.record(max_length=120, action="/voicemail-complete?dept=systems")
-        return Response(content=str(response), media_type="application/xml")
 
     # --- SPAM SCREENING ---
     if not SpeechResult:
-        log_call(From, "No Input / Timeout", "No digits pressed or speech detected")
+        log_call(From, "No Input / Timeout", "No speech detected")
         response.say("I did not catch that. Goodbye.")
         response.hangup()
         return Response(content=str(response), media_type="application/xml")
@@ -262,9 +283,9 @@ async def process_menu(From: str = Form(...), Digits: str = Form(None), SpeechRe
             response.redirect("/protocol-hammer")
             
     else:
-        # Unknown but potentially legitimate caller who spoke instead of pressing a button
+        # Unknown but potentially legitimate caller who spoke
         log_call(From, "Unknown (Speech)", f"Spoke: '{SpeechResult}'")
-        response.say("Your call has been cleared, but the person you are trying to reach is unavailable. Please leave a message.")
+        response.say(f"Your call has been cleared, but the person you are trying to reach at {COMPANY_NAME} is unavailable. Please leave a message.")
         response.record(max_length=120, action="/voicemail-complete?dept=cleared")
         
     return Response(content=str(response), media_type="application/xml")
@@ -272,11 +293,11 @@ async def process_menu(From: str = Form(...), Digits: str = Form(None), SpeechRe
 
 @app.post("/incoming-sms")
 async def incoming_sms(From: str = Form(...), Body: str = Form(...)):
-    """Phase 1: Catch incoming texts and send a push notification to Slack."""
+    """Catch incoming texts and send a push notification to Slack."""
     
     if SLACK_WEBHOOK_URL:
         slack_payload = {
-            "text": f"🚨 *New Henegar Services Lead*\n*Number:* {From}\n*Message:* {Body}"
+            "text": f"🚨 *New {COMPANY_NAME} Lead*\n*Number:* {From}\n*Message:* {Body}"
         }
         try:
             requests.post(SLACK_WEBHOOK_URL, json=slack_payload)
@@ -351,20 +372,16 @@ async def voicemail_complete(
     From: str = Form(None), 
     RecordingUrl: str = Form(None)
 ):
-    """Catches the finished voicemail and routes the alert based on the department."""
+    """Catches the finished voicemail and routes alerts."""
     
-   # 1. Route to SMS (For Paint Jobs, VIP Bypass, and Cleared Callers)
-    if dept in ["paint", "vip", "cleared"]:
+    if dept in ["vip", "cleared"]:
         try:
             if dept == "vip":
-                subject = "VIP Call Alert"
+                subject = f"{COMPANY_NAME} - VIP Call Alert"
                 content = f"🔴 VIP Caller {From} left a message. Listen: {RecordingUrl}"
-            elif dept == "cleared":
-                subject = "Cleared Call Alert"
+            else:
+                subject = f"{COMPANY_NAME} - Cleared Call Alert"
                 content = f"🟢 Cleared Caller {From} left a message. Listen: {RecordingUrl}"
-            else: # paint
-                subject = "Paint Lead"
-                content = f"New Paint Lead from {From}. Listen here: {RecordingUrl}"
 
             msg = EmailMessage()
             msg.set_content(content)
@@ -380,18 +397,7 @@ async def voicemail_complete(
         except Exception as e:
             print(f"Failed to send SMS Alert: {e}")
 
-    # 2. Route to Slack (For IT/Systems Jobs)
-    elif dept == "systems":
-        if SLACK_WEBHOOK_URL:
-            slack_payload = {
-                "text": f"💻 *New IT/Systems Lead*\n*Number:* {From}\n*Voicemail:* {RecordingUrl}"
-            }
-            try:
-                requests.post(SLACK_WEBHOOK_URL, json=slack_payload)
-            except Exception as e:
-                print(f"Failed to send Slack alert: {e}")
-
-    # 3. Always hang up gracefully
+    # Always hang up gracefully
     response = VoiceResponse()
     response.say("Thank you. Your message has been saved. Goodbye.")
     response.hangup()

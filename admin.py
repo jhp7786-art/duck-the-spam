@@ -2,7 +2,7 @@ import streamlit as st
 import psycopg2
 import pandas as pd
 import os
-from dotenv import load_dotenv, set_key
+from dotenv import load_dotenv
 
 # Load environment variables
 load_dotenv()
@@ -10,7 +10,8 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
     st.error("DATABASE_URL environment variable is not set. Please define it in your .env file or environment.")
     st.stop()
-ENV_FILE = ".env"
+
+COMPANY_NAME = os.getenv("COMPANY_NAME", "New Life Appliance Repair")
 
 def get_db_connection():
     return psycopg2.connect(DATABASE_URL)
@@ -35,7 +36,7 @@ def fetch_dataframe(query, params=None):
     finally:
         conn.close()
 
-# Initialize DB structure in Streamlit as well to prevent catalog exceptions
+# Initialize DB structure
 def ensure_db():
     conn = get_db_connection()
     try:
@@ -76,18 +77,28 @@ def ensure_db():
                     VALUES ('spam_protocol', 'JOHN')
                     ON CONFLICT (key) DO NOTHING
                 """)
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS leads (
+                        id SERIAL PRIMARY KEY,
+                        phone VARCHAR,
+                        appliance VARCHAR,
+                        issue VARCHAR,
+                        status VARCHAR DEFAULT 'Awaiting Booking',
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                """)
     finally:
         conn.close()
 
 ensure_db()
 
-st.set_page_config(page_title="Henegar Services - Telecom Control", page_icon="📞", layout="wide")
+st.set_page_config(page_title=f"{COMPANY_NAME} - Dispatch Control", page_icon="📞", layout="wide")
 
-st.title("📞 Henegar Services Telecom Command Center")
+st.title(f"📞 {COMPANY_NAME} Dispatch Command Center")
 st.markdown("---")
 
 # ==========================================
-# 1. MODE SELECTOR (THE LOOM SHOWCASE)
+# 1. MODE SELECTOR (SPAM DEFENSE PROTOCOL)
 # ==========================================
 st.header("🛡️ Active Spam Defense Protocol")
 
@@ -109,27 +120,26 @@ finally:
 modes = {
     "JOHN": {
         "title": "🎭 The 'John' (UNO Reverse)",
-        "desc": "The ultimate trap. Stalls financial/loan spammers by pretending to be their long-lost friend 'John' in a panic about his own extended car warranty, then exits with a sarcastic 'wonk wonk wonk'."
+        "desc": "Stalls spammers by pretending to be their long-lost friend 'John' asking about extended car warranty, ending with a sarcastic sound effect."
     },
     "TODDLER": {
         "title": "👶 The Toddler",
-        "desc": "Frustrates callers to the point of rage-quitting by trapping them in an infinite loop that constantly interrupts their pitch by asking 'Why?' every time they stop speaking."
+        "desc": "Traps callers in an endless loop interrupting their pitch by asking 'Why?' every time they stop speaking."
     },
     "PARROT": {
         "title": "🦜 The Parrot",
-        "desc": "Echos the spammer's exact transcribed words right back to them in a robotic voice loop, mimicking them until they hang up in frustration."
+        "desc": "Echoes the spammer's exact words back in a robotic voice loop until they hang up."
     },
     "HAMMER": {
         "title": "🔨 The Hammer",
-        "desc": "A stern, no-nonsense warning informing the solicitor that their number has been logged and blacklisted, followed by an immediate disconnect."
+        "desc": "Warns the caller that their number is logged and blacklisted, then immediately disconnects."
     },
     "SHUFFLE": {
         "title": "🔀 The Shuffle (Random)",
-        "desc": "Keeps solicitors off-balance by randomly picking a different defense protocol (John, Toddler, Parrot, or Hammer) for each screened spam call."
+        "desc": "Randomly selects a different defense protocol (John, Toddler, Parrot, or Hammer) for each screened spam call."
     }
 }
 
-# Determine index for selectbox
 mode_keys = list(modes.keys())
 default_index = mode_keys.index(current_mode) if current_mode in mode_keys else 0
 
@@ -140,17 +150,15 @@ selected_key = st.selectbox(
     index=default_index
 )
 
-# Display description for Loom walkthrough
 st.info(modes[selected_key]["desc"])
 
-# Save button to update settings in database
 if st.button("Apply Selected Protocol"):
     try:
         db_execute(
             "INSERT INTO app_settings (key, value) VALUES ('spam_protocol', %s) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
             (selected_key,)
         )
-        st.success(f"Successfully switched to {modes[selected_key]['title']}! Changes applied instantly across all systems.")
+        st.success(f"Successfully switched to {modes[selected_key]['title']}!")
         st.rerun()
     except Exception as e:
         st.error(f"Failed to apply protocol: {e}")
@@ -158,14 +166,60 @@ if st.button("Apply Selected Protocol"):
 st.markdown("---")
 
 # ==========================================
-# 2. CALL LOGS & LIST MANAGEMENT (TABS)
+# 2. CLIENT LEADS & MANAGEMENT TABS
 # ==========================================
-tab_logs, tab_vip, tab_blacklist = st.tabs([
-    "📊 Call Log Command Center",
-    "🔑 VIP List (Bypass)",
-    "🚫 Blacklisted Spammers"
+tab_leads, tab_logs, tab_vip, tab_blacklist = st.tabs([
+    "📋 Client Leads",
+    "📊 Call Logs",
+    f"🔑 {COMPANY_NAME} VIP Whitelist",
+    f"🚫 {COMPANY_NAME} Blacklisted Spammers"
 ])
 
+# --- TAB 1: CLIENT LEADS ---
+with tab_leads:
+    st.header(f"📋 {COMPANY_NAME} Client Leads")
+    st.write("Incoming leads logged via Twilio Studio webhooks.")
+    
+    try:
+        leads_df = fetch_dataframe(
+            "SELECT id, phone AS \"Phone\", appliance AS \"Appliance\", issue AS \"Issue\", status AS \"Status\", created_at AS \"Created At\" FROM leads ORDER BY created_at DESC"
+        )
+        
+        if not leads_df.empty:
+            event_leads = st.dataframe(
+                leads_df,
+                use_container_width=True,
+                on_select="rerun",
+                selection_mode="single-row",
+                key="leads_table"
+            )
+            
+            selected_lead_rows = event_leads.selection.rows
+            if selected_lead_rows:
+                row_idx = selected_lead_rows[0]
+                lead_id = int(leads_df.iloc[row_idx]["id"])
+                lead_phone = leads_df.iloc[row_idx]["Phone"]
+                current_status = leads_df.iloc[row_idx]["Status"]
+                
+                st.markdown(f"### ⚡ Manage Lead ID #{lead_id} ({lead_phone})")
+                col_s1, col_s2 = st.columns(2)
+                with col_s1:
+                    new_status = st.selectbox("Update Status:", ["Awaiting Booking", "Booked", "Completed", "Cancelled"], index=["Awaiting Booking", "Booked", "Completed", "Cancelled"].index(current_status) if current_status in ["Awaiting Booking", "Booked", "Completed", "Cancelled"] else 0, key="status_select")
+                    if st.button("Update Lead Status", key="update_lead_btn"):
+                        db_execute("UPDATE leads SET status = %s WHERE id = %s", (new_status, lead_id))
+                        st.success(f"Updated lead #{lead_id} status to '{new_status}'!")
+                        st.rerun()
+                with col_s2:
+                    if st.button("Delete Lead Record", key="delete_lead_btn"):
+                        db_execute("DELETE FROM leads WHERE id = %s", (lead_id,))
+                        st.warning(f"Deleted lead #{lead_id}.")
+                        st.rerun()
+        else:
+            st.info("No client leads logged yet. Webhooks received from Twilio Studio will appear here.")
+    except Exception as e:
+        st.error(f"Error loading client leads: {e}")
+
+# --- TAB 2: CALL LOGS ---
 with tab_logs:
     st.header("📊 Call Log Command Center")
     st.write("Click any row in the log below to view caller history and take quick actions.")
@@ -176,7 +230,6 @@ with tab_logs:
         )
         
         if not call_logs.empty:
-            # Interactive Dataframe with Row Selection
             event = st.dataframe(
                 call_logs,
                 use_container_width=True,
@@ -192,7 +245,6 @@ with tab_logs:
                 
                 st.markdown(f"### ⚡ Quick Actions for: `{selected_phone}`")
                 
-                # Check status
                 conn = get_db_connection()
                 try:
                     with conn.cursor() as cur:
@@ -214,10 +266,9 @@ with tab_logs:
                             st.rerun()
                     else:
                         st.write("**Add to VIP List**")
-                        vip_name_input = st.text_input("Contact Name (e.g. John Doe):", value="Unnamed VIP", key="vip_name_from_logs")
+                        vip_name_input = st.text_input("Contact Name:", value="Unnamed VIP", key="vip_name_from_logs")
                         vip_greeting_input = st.text_input("Custom Greeting (Optional):", placeholder="e.g. Welcome Bob!", key="vip_greeting_from_logs")
                         if st.button("Add to VIP List", key="add_vip_from_logs"):
-                            # Remove from blacklist first if it exists there
                             db_execute("DELETE FROM blacklist WHERE phone_number = %s", (selected_phone,))
                             db_execute("INSERT INTO vip (phone_number, name, custom_greeting) VALUES (%s, %s, %s) ON CONFLICT (phone_number) DO UPDATE SET name = EXCLUDED.name, custom_greeting = EXCLUDED.custom_greeting", (selected_phone, vip_name_input, vip_greeting_input.strip() or None))
                             st.success(f"Added {selected_phone} to VIP List!")
@@ -232,27 +283,26 @@ with tab_logs:
                             st.rerun()
                     else:
                         st.write("**Block Caller**")
-                        block_reason_input = st.text_input("Reason for block (e.g. Loan Spam):", value="Manual Block", key="block_reason_from_logs")
+                        block_reason_input = st.text_input("Reason for block:", value="Manual Block", key="block_reason_from_logs")
                         if st.button("Block Number", key="block_from_logs"):
-                            # Remove from VIP first if it exists there
                             db_execute("DELETE FROM vip WHERE phone_number = %s", (selected_phone,))
                             db_execute("INSERT INTO blacklist (phone_number, reason) VALUES (%s, %s) ON CONFLICT (phone_number) DO NOTHING", (selected_phone, block_reason_input))
                             st.success(f"Blocked {selected_phone}!")
                             st.rerun()
         else:
-            st.info("No calls logged yet. Incoming calls will appear here in real time.")
+            st.info("No calls logged yet.")
     except Exception as e:
         st.error(f"Could not load call logs: {e}")
 
+# --- TAB 3: VIP WHITELIST ---
 with tab_vip:
-    st.header("🔑 VIP List (Ladder Bypass)")
-    st.write("Numbers on this list bypass all IVR menus and screening, routing straight to your friendly voicemail.")
+    st.header(f"🔑 {COMPANY_NAME} VIP Whitelist")
+    st.write("Numbers on this list bypass call screening and route straight to voicemail.")
     
-    # VIP Form to add new number manually
     st.subheader("Add Contact Manually")
     manual_col1, manual_col2, manual_col3 = st.columns(3)
     with manual_col1:
-        new_vip_name = st.text_input("Contact Name (e.g. John Doe):", key="vip_name_input")
+        new_vip_name = st.text_input("Contact Name:", key="vip_name_input")
     with manual_col2:
         new_vip_number = st.text_input("VIP Phone Number (Format: +1256...):", key="vip_num_input")
     with manual_col3:
@@ -261,11 +311,10 @@ with tab_vip:
     if st.button("Add to VIP List", key="add_vip_manual"):
         if new_vip_number.strip():
             try:
-                # Remove from blacklist first if there
                 db_execute("DELETE FROM blacklist WHERE phone_number = %s", (new_vip_number.strip(),))
                 db_execute("INSERT INTO vip (phone_number, name, custom_greeting) VALUES (%s, %s, %s) ON CONFLICT (phone_number) DO UPDATE SET name = EXCLUDED.name, custom_greeting = EXCLUDED.custom_greeting", 
                              (new_vip_number.strip(), new_vip_name.strip() or "Unnamed VIP", new_vip_greeting.strip() or None))
-                st.success(f"Added {new_vip_number.strip()} to the VIP List!")
+                st.success(f"Added {new_vip_number.strip()} to VIP List!")
                 st.rerun()
             except Exception as e:
                 st.error(f"Error adding VIP: {e}")
@@ -273,7 +322,6 @@ with tab_vip:
             st.error("Phone number is required.")
             
     st.subheader("Current VIP Contacts")
-    # Load and show current VIP list
     try:
         vip_data = fetch_dataframe("SELECT phone_number, name, custom_greeting, added_at FROM vip ORDER BY added_at DESC")
         
@@ -298,11 +346,10 @@ with tab_vip:
             with vip_col1:
                 if st.button("Remove VIP", key="remove_vip_btn"):
                     db_execute("DELETE FROM vip WHERE phone_number = %s", (vip_to_remove,))
-                    st.success(f"Removed {vip_to_remove} from the VIP List.")
+                    st.success(f"Removed {vip_to_remove} from VIP List.")
                     st.rerun()
             with vip_col2:
                 if st.button("Block (Move to Blacklist)", key="demote_vip_btn"):
-                    # Get VIP name to use as reason
                     conn = get_db_connection()
                     try:
                         with conn.cursor() as cur:
@@ -320,11 +367,11 @@ with tab_vip:
     except Exception as e:
         st.error(f"Could not load VIP list: {e}")
 
+# --- TAB 4: BLACKLIST ---
 with tab_blacklist:
-    st.header("🚫 Blacklisted Spammers")
-    st.write("Numbers on this list are blocked automatically without routing to a menu.")
+    st.header(f"🚫 {COMPANY_NAME} Blacklisted Spammers")
+    st.write("Numbers on this list are blocked automatically.")
     
-    # Form to blacklist a number manually
     st.subheader("Add Spammer Manually")
     bl_manual_col1, bl_manual_col2 = st.columns(2)
     with bl_manual_col1:
@@ -335,7 +382,6 @@ with tab_blacklist:
     if st.button("Add to Blacklist", key="add_blacklist_manual"):
         if new_block_number.strip():
             try:
-                # Remove from VIP first if there
                 db_execute("DELETE FROM vip WHERE phone_number = %s", (new_block_number.strip(),))
                 db_execute("INSERT INTO blacklist (phone_number, reason) VALUES (%s, %s) ON CONFLICT (phone_number) DO NOTHING", 
                              (new_block_number.strip(), new_block_reason.strip() or "Manual Block"))
@@ -374,7 +420,6 @@ with tab_blacklist:
                     st.success(f"Purged {phone_to_remove} from the blacklist.")
                     st.rerun()
             with bl_col2:
-                # Ask for name to promote to VIP
                 promote_name = st.text_input("Name to Promote to VIP:", value="Promoted Spammer", key="promote_name_input")
                 promote_greeting = st.text_input("Custom Greeting (Optional):", key="promote_greeting_input")
                 if st.button("Forgive & Move to VIP", key="promote_bl_btn"):
@@ -383,42 +428,6 @@ with tab_blacklist:
                     st.success(f"Promoted {phone_to_remove} to VIP List as '{promote_name}'.")
                     st.rerun()
         else:
-            st.write("No spammers currently blocked. The wall stands tall!")
+            st.write("No spammers currently blocked.")
     except Exception as e:
         st.error(f"Could not load database: {e}")
-
-st.markdown("---")
-
-# ==========================================
-# 3. NOTIFICATION PREFERENCES (DEMO / SALES FEATURE)
-# ==========================================
-st.header("📲 Lead Routing & Notifications")
-st.write("Configure how you want to be notified when a legitimate client leaves a message or passes the screener.")
-
-col3, col4 = st.columns(2)
-
-with col3:
-    notification_method = st.selectbox(
-        "Select Notification Delivery Method:",
-        options=[
-            "Direct SMS Alert (Carrier Native - Free)", 
-            "Slack / Discord Push Notification", 
-            "Voicemail-to-Email Drop", 
-            "Pushover (High Priority Alert App)"
-        ]
-    )
-    
-    # Fake a save button for the demo
-    if st.button("Save Routing Preferences"):
-        st.info(f"Demo Mode: In a live environment, leads will now be routed via {notification_method.split(' (')[0]}.")
-
-with col4:
-    st.info("**Sales Demo Note:**")
-    if "Direct SMS" in notification_method:
-        st.write("Uses the carrier's native Email-to-SMS gateway to bypass Twilio's A2P 10DLC restrictions. Client gets a standard text message instantly for $0.00.")
-    elif "Slack" in notification_method:
-        st.write("Routes the transcript, phone number, and audio link directly to a private Slack or Discord channel. Perfect for keeping personal texts and business separate.")
-    elif "Voicemail-to-Email" in notification_method:
-        st.write("Packages the audio file (.mp3) and a written transcript into an email. Ideal for contractors who do their quotes at a desk at the end of the day.")
-    else:
-        st.write("Triggers a dedicated push notification app for high-priority alerts that break through 'Do Not Disturb' settings.")
