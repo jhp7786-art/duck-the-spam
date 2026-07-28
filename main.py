@@ -56,8 +56,8 @@ class LeadPayload(BaseModel):
     issue: str
 
 @app.get("/")
-def read_root():
-    return {"status": f"{COMPANY_NAME} dispatch system is active"}
+def health_check():
+    return {"status": "ok"}
 
 def init_db():
     conn = get_db_connection()
