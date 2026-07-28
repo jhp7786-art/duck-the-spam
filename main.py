@@ -49,8 +49,8 @@ VIP_NUMBERS = [
 app = FastAPI(title="Duck the Spam", description="A multi-mode automated call screener.")
 
 @app.get("/")
-def read_root():
-    return {"status": "Spam trap is armed and active"}
+def health_check():
+    return {"status": "ok"}
 
 def init_db():
     conn = get_db_connection()
