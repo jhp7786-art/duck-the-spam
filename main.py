@@ -55,7 +55,7 @@ class LeadPayload(BaseModel):
     appliance: str
     issue: str
 
-@app.get("/")
+@app.api_route("/", methods=["GET", "HEAD"])
 def health_check():
     return {"status": "ok"}
 
