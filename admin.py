@@ -296,9 +296,10 @@ with tab_logs:
         
     st.markdown("---")
     st.subheader("Convert Voicemail to Lead")
-    with st.form("voicemail_to_lead_form"):
+    with st.form("convert_lead_form", clear_on_submit=True):
         caller_phone = st.text_input("Caller Phone")
         caller_name = st.text_input("Caller Name")
+        address = st.text_input("Address")
         appliance = st.selectbox("Appliance Type", ["Refrigerator", "Washer", "Dryer", "Oven / Stove", "Dishwasher", "Microwave", "Other"])
         issue = st.text_area("Issue")
         
@@ -308,6 +309,7 @@ with tab_logs:
             payload = {
                 "Name": caller_name,
                 "Phone": caller_phone,
+                "Address": address,
                 "Appliance": appliance,
                 "Issue": issue
             }
