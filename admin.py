@@ -7,7 +7,7 @@ from dotenv import load_dotenv
 
 # Load environment variables
 load_dotenv()
-MAKE_WEBHOOK_URL = "https://hook.us2.make.com/..."
+MAKE_WEBHOOK_URL = os.getenv("MAKE_WEBHOOK_URL")
 DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
     st.error("DATABASE_URL environment variable is not set. Please define it in your .env file or environment.")
@@ -299,7 +299,7 @@ with tab_logs:
     with st.form("voicemail_to_lead_form"):
         caller_phone = st.text_input("Caller Phone")
         caller_name = st.text_input("Caller Name")
-        appliance = st.text_input("Appliance")
+        appliance = st.selectbox("Appliance Type", ["Refrigerator", "Washer", "Dryer", "Oven / Stove", "Dishwasher", "Microwave", "Other"])
         issue = st.text_area("Issue")
         
         submit_btn = st.form_submit_button("Send to Automation Pipeline")
