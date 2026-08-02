@@ -2,10 +2,12 @@ import streamlit as st
 import psycopg2
 import pandas as pd
 import os
+import requests
 from dotenv import load_dotenv
 
 # Load environment variables
 load_dotenv()
+MAKE_WEBHOOK_URL = "https://hook.us2.make.com/..."
 DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
     st.error("DATABASE_URL environment variable is not set. Please define it in your .env file or environment.")
@@ -92,7 +94,7 @@ def ensure_db():
 
 ensure_db()
 
-st.set_page_config(page_title=f"{COMPANY_NAME} - Dispatch Control", page_icon="📞", layout="wide")
+st.set_page_config(page_title="New Life Dispatch", page_icon="https://raw.githubusercontent.com/jhp7786-art/jhp7786-art/main/collab-logo.svg", layout="wide")
 
 st.title(f"📞 {COMPANY_NAME} Dispatch Command Center")
 st.markdown("---")
@@ -186,34 +188,32 @@ with tab_leads:
         )
         
         if not leads_df.empty:
-            event_leads = st.dataframe(
+            edited_df = st.data_editor(
                 leads_df,
+                hide_index=True,
+                disabled=["id", "Phone", "Appliance", "Issue", "Created At"],
+                column_config={
+                    "Status": st.column_config.SelectboxColumn(
+                        "Status",
+                        options=["Awaiting Booking", "Scheduled", "Completed", "Canceled"],
+                        required=True,
+                    )
+                },
                 use_container_width=True,
-                on_select="rerun",
-                selection_mode="single-row",
-                key="leads_table"
+                key="leads_editor"
             )
             
-            selected_lead_rows = event_leads.selection.rows
-            if selected_lead_rows:
-                row_idx = selected_lead_rows[0]
-                lead_id = int(leads_df.iloc[row_idx]["id"])
-                lead_phone = leads_df.iloc[row_idx]["Phone"]
-                current_status = leads_df.iloc[row_idx]["Status"]
-                
-                st.markdown(f"### ⚡ Manage Lead ID #{lead_id} ({lead_phone})")
-                col_s1, col_s2 = st.columns(2)
-                with col_s1:
-                    new_status = st.selectbox("Update Status:", ["Awaiting Booking", "Booked", "Completed", "Cancelled"], index=["Awaiting Booking", "Booked", "Completed", "Cancelled"].index(current_status) if current_status in ["Awaiting Booking", "Booked", "Completed", "Cancelled"] else 0, key="status_select")
-                    if st.button("Update Lead Status", key="update_lead_btn"):
-                        db_execute("UPDATE leads SET status = %s WHERE id = %s", (new_status, lead_id))
-                        st.success(f"Updated lead #{lead_id} status to '{new_status}'!")
-                        st.rerun()
-                with col_s2:
-                    if st.button("Delete Lead Record", key="delete_lead_btn"):
-                        db_execute("DELETE FROM leads WHERE id = %s", (lead_id,))
-                        st.warning(f"Deleted lead #{lead_id}.")
-                        st.rerun()
+            if st.button("Save Changes", key="save_leads_changes"):
+                edited_rows = st.session_state["leads_editor"].get("edited_rows", {})
+                if edited_rows:
+                    for row_idx, edits in edited_rows.items():
+                        if "Status" in edits:
+                            new_status = edits["Status"]
+                            lead_id = int(leads_df.iloc[int(row_idx)]["id"])
+                            db_execute("UPDATE leads SET status = %s WHERE id = %s", (new_status, lead_id))
+                    
+                    st.success("Changes saved successfully!")
+                    st.rerun()
         else:
             st.info("No client leads logged yet. Webhooks received from Twilio Studio will appear here.")
     except Exception as e:
@@ -293,6 +293,30 @@ with tab_logs:
             st.info("No calls logged yet.")
     except Exception as e:
         st.error(f"Could not load call logs: {e}")
+        
+    st.markdown("---")
+    st.subheader("Convert Voicemail to Lead")
+    with st.form("voicemail_to_lead_form"):
+        caller_phone = st.text_input("Caller Phone")
+        caller_name = st.text_input("Caller Name")
+        appliance = st.text_input("Appliance")
+        issue = st.text_area("Issue")
+        
+        submit_btn = st.form_submit_button("Send to Automation Pipeline")
+        
+        if submit_btn:
+            payload = {
+                "Name": caller_name,
+                "Phone": caller_phone,
+                "Appliance": appliance,
+                "Issue": issue
+            }
+            try:
+                response = requests.post(MAKE_WEBHOOK_URL, json=payload)
+                response.raise_for_status()
+                st.success("Successfully sent to automation pipeline!")
+            except Exception as req_e:
+                st.error(f"Failed to send to webhook: {req_e}")
 
 # --- TAB 3: VIP WHITELIST ---
 with tab_vip:
@@ -431,3 +455,9 @@ with tab_blacklist:
             st.write("No spammers currently blocked.")
     except Exception as e:
         st.error(f"Could not load database: {e}")
+
+# Custom Branding
+st.sidebar.markdown("---")
+st.sidebar.markdown("<div style='text-align: center;'>🚀 Engineered & Automated by <b>Henegar Services</b></div>", unsafe_allow_html=True)
+st.sidebar.markdown("![H(AI²)](https://raw.githubusercontent.com/jhp7786-art/jhp7786-art/main/collab-logo.svg)")
+
