@@ -49,22 +49,35 @@ CARRIER_GATEWAY = os.getenv("CARRIER_GATEWAY")
 VIP_NUMBERS = [
     os.getenv("MY_REAL_PHONE_NUMBER")
 ]
-from fastapi.middleware.cors import CORSMiddleware
-
 app = FastAPI(title=f"{COMPANY_NAME} Dispatch System", description="Automated client dispatch and call screening service.")
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"], 
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 
 class LeadPayload(BaseModel):
     phone: str
     appliance: str
     issue: str
+    name: str = "Unknown"
+    address: str = "Unknown"
+
+@app.post("/log-lead")
+async def log_lead(payload: LeadPayload):
+    """Logs incoming leads into PostgreSQL and returns the lead_id."""
+    conn = get_db_connection()
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO leads (phone, appliance, issue, status)
+                    VALUES (%s, %s, %s, %s)
+                    RETURNING id;
+                """, (payload.phone, payload.appliance, payload.issue, "Awaiting Booking"))
+                lead_id = cur.fetchone()[0]
+                
+        return {"status": "success", "lead_id": lead_id}
+    except Exception as e:
+        print(f"Failed to log lead: {e}")
+        return {"status": "error", "message": str(e)}
+    finally:
+        conn.close()
 
 @app.api_route("/", methods=["GET", "HEAD"])
 def health_check():
@@ -415,50 +428,6 @@ async def voicemail_complete(
     
     return Response(content=str(response), media_type="application/xml")
 
-# 1. Update LeadPayload schema
-class WebLeadPayload(BaseModel):
-    name: str
-    phone: str
-    address: str
-    appliance: str
-    issue: str
-
-MAKE_WEBHOOK_URL = os.getenv("MAKE_WEBHOOK_URL", "https://hook.us2.make.com/YOUR_MAKE_WEBHOOK_ID_HERE")
-
-@app.post("/web-lead")
-async def handle_web_lead(payload: WebLeadPayload):
-    """Saves lead to PostgreSQL, retrieves generated lead_id, and forwards to Make.com."""
-    conn = get_db_connection()
-    try:
-        with conn:
-            with conn.cursor() as cur:
-                # Insert lead and return auto-generated ID
-                cur.execute("""
-                    INSERT INTO leads (phone, appliance, issue, status)
-                    VALUES (%s, %s, %s, %s)
-                    RETURNING id;
-                """, (payload.phone, payload.appliance, payload.issue, "Awaiting Booking"))
-                
-                lead_id = cur.fetchone()[0]
-
-        # Forward full payload + lead_id to Make.com
-        make_data = {
-            "lead_id": lead_id,
-            "name": payload.name,
-            "phone": payload.phone,
-            "address": payload.address,
-            "appliance": payload.appliance,
-            "issue": payload.issue
-        }
-        
-        requests.post(MAKE_WEBHOOK_URL, json=make_data)
-
-        return {"status": "success", "lead_id": lead_id}
-    except Exception as e:
-        print(f"Failed to log web lead: {e}")
-        return {"status": "error", "message": str(e)}
-    finally:
-        conn.close()
 
 @app.post("/slack/interactivity")
 async def slack_interactivity(payload: str = Form(...)):
