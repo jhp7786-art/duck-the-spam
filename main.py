@@ -213,26 +213,7 @@ def log_call(phone_number: str, call_type: str, details: str):
 
 init_db()
 
-@app.post("/log-lead")
-async def log_lead(payload: LeadPayload):
-    """Accepts JSON webhooks from Twilio Studio and logs incoming leads into PostgreSQL."""
-    conn = get_db_connection()
-    try:
-        with conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    INSERT INTO leads (phone, appliance, issue, status)
-                    VALUES (%s, %s, %s, %s)
-                    """,
-                    (payload.phone, payload.appliance, payload.issue, "Awaiting Booking")
-                )
-        return {"status": "success", "message": "Lead logged successfully"}
-    except Exception as e:
-        print(f"Failed to log lead: {e}")
-        return {"status": "error", "message": str(e)}
-    finally:
-        conn.close()
+
 
 @app.post("/incoming-call", dependencies=[Depends(validate_twilio_request)])
 async def handle_incoming_call(From: str = Form(...)):
