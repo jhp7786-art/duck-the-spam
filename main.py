@@ -4,8 +4,12 @@ import urllib.parse
 import json
 import psycopg2
 import requests 
-from fastapi import FastAPI, Form, Response, Header, HTTPException
+import hmac
+import hashlib
+import time
+from fastapi import FastAPI, Form, Response, Header, HTTPException, Request, Depends
 from twilio.twiml.voice_response import VoiceResponse, Gather
+from twilio.request_validator import RequestValidator
 from dotenv import load_dotenv
 from pydantic import BaseModel
 
@@ -18,6 +22,50 @@ if not DATABASE_URL:
 SLACK_WEBHOOK_URL = os.getenv("SLACK_WEBHOOK_URL", "") 
 API_SECRET_KEY = os.getenv("API_SECRET_KEY")
 COMPANY_NAME = os.getenv("COMPANY_NAME", "New Life Appliance Repair")
+
+TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN", "")
+twilio_validator = RequestValidator(TWILIO_AUTH_TOKEN)
+
+SLACK_SIGNING_SECRET = os.getenv("SLACK_SIGNING_SECRET", "")
+
+async def validate_twilio_request(request: Request):
+    if not TWILIO_AUTH_TOKEN:
+        return
+    signature = request.headers.get("X-Twilio-Signature", "")
+    url = str(request.url)
+    if request.headers.get("x-forwarded-proto") == "https" and url.startswith("http://"):
+        url = url.replace("http://", "https://", 1)
+        
+    form_data = await request.form()
+    params = dict(form_data)
+    
+    if not twilio_validator.validate(url, params, signature):
+        raise HTTPException(status_code=403, detail="Invalid Twilio signature")
+
+async def validate_slack_request(request: Request):
+    if not SLACK_SIGNING_SECRET:
+        return
+    
+    slack_signature = request.headers.get("X-Slack-Signature", "")
+    slack_timestamp = request.headers.get("X-Slack-Request-Timestamp", "")
+    
+    if not slack_signature or not slack_timestamp:
+        raise HTTPException(status_code=403, detail="Missing Slack headers")
+        
+    if abs(time.time() - int(slack_timestamp)) > 60 * 5:
+        raise HTTPException(status_code=403, detail="Replay attack detected")
+        
+    body = await request.body()
+    sig_basestring = f"v0:{slack_timestamp}:{body.decode('utf-8')}"
+    
+    my_signature = 'v0=' + hmac.new(
+        SLACK_SIGNING_SECRET.encode("utf-8"),
+        sig_basestring.encode("utf-8"),
+        hashlib.sha256
+    ).hexdigest()
+    
+    if not hmac.compare_digest(my_signature, slack_signature):
+        raise HTTPException(status_code=403, detail="Invalid Slack signature")
 
 def get_db_connection():
     return psycopg2.connect(DATABASE_URL) 
@@ -186,7 +234,7 @@ async def log_lead(payload: LeadPayload):
     finally:
         conn.close()
 
-@app.post("/incoming-call")
+@app.post("/incoming-call", dependencies=[Depends(validate_twilio_request)])
 async def handle_incoming_call(From: str = Form(...)):
     """Step 1: VIP Check, Blacklist Check, and Call Screening."""
     response = VoiceResponse()
@@ -266,7 +314,7 @@ async def handle_incoming_call(From: str = Form(...)):
     
     return Response(content=str(response), media_type="application/xml")
 
-@app.post("/process-menu")
+@app.post("/process-menu", dependencies=[Depends(validate_twilio_request)])
 async def process_menu(From: str = Form(...), Digits: str = Form(None), SpeechResult: str = Form(None)):
     """Step 2: Analyze speech for spam or route cleared callers."""
     response = VoiceResponse()
@@ -319,7 +367,7 @@ async def process_menu(From: str = Form(...), Digits: str = Form(None), SpeechRe
     return Response(content=str(response), media_type="application/xml")
 
 
-@app.post("/incoming-sms")
+@app.post("/incoming-sms", dependencies=[Depends(validate_twilio_request)])
 async def incoming_sms(From: str = Form(...), Body: str = Form(...)):
     """Catch incoming texts and send a push notification to Slack."""
     
@@ -340,7 +388,7 @@ async def incoming_sms(From: str = Form(...), Body: str = Form(...)):
 # DEFENSE PROTOCOLS
 # ==========================================
 
-@app.post("/protocol-john")
+@app.post("/protocol-john", dependencies=[Depends(validate_twilio_request)])
 async def protocol_john(SpeechResult: str = None):
     response = VoiceResponse()
     caller_name = ""
@@ -359,14 +407,14 @@ async def protocol_john(SpeechResult: str = None):
     response.hangup()
     return Response(content=str(response), media_type="application/xml")
 
-@app.post("/protocol-hammer")
+@app.post("/protocol-hammer", dependencies=[Depends(validate_twilio_request)])
 async def protocol_hammer():
     response = VoiceResponse()
     response.say("You have reached a restricted number. Remove this number from your dialer immediately. Goodbye.")
     response.hangup()
     return Response(content=str(response), media_type="application/xml")
 
-@app.post("/protocol-toddler")
+@app.post("/protocol-toddler", dependencies=[Depends(validate_twilio_request)])
 async def protocol_toddler(SpeechResult: str = Form(None)):
     response = VoiceResponse()
     if not SpeechResult:
@@ -378,7 +426,7 @@ async def protocol_toddler(SpeechResult: str = Form(None)):
     response.append(gather)
     return Response(content=str(response), media_type="application/xml")
 
-@app.post("/protocol-parrot")
+@app.post("/protocol-parrot", dependencies=[Depends(validate_twilio_request)])
 async def protocol_parrot(phrase: str = None, SpeechResult: str = Form(None)):
     response = VoiceResponse()
     text_to_parrot = SpeechResult if SpeechResult else phrase
@@ -394,7 +442,7 @@ async def protocol_parrot(phrase: str = None, SpeechResult: str = Form(None)):
 import smtplib
 from email.message import EmailMessage
 
-@app.post("/voicemail-complete")
+@app.post("/voicemail-complete", dependencies=[Depends(validate_twilio_request)])
 async def voicemail_complete(
     dept: str = None, 
     From: str = Form(None), 
@@ -433,7 +481,7 @@ async def voicemail_complete(
     return Response(content=str(response), media_type="application/xml")
 
 
-@app.post("/slack/interactivity")
+@app.post("/slack/interactivity", dependencies=[Depends(validate_slack_request)])
 async def slack_interactivity(payload: str = Form(...)):
     try:
         data = json.loads(payload)

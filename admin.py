@@ -7,6 +7,25 @@ from dotenv import load_dotenv
 
 # Load environment variables
 load_dotenv()
+
+ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD")
+if "authenticated" not in st.session_state:
+    st.session_state["authenticated"] = False
+
+def check_password():
+    if st.session_state.get("password_input") == ADMIN_PASSWORD:
+        st.session_state["authenticated"] = True
+    else:
+        st.error("Incorrect password")
+
+if not st.session_state["authenticated"]:
+    if not ADMIN_PASSWORD:
+        st.warning("ADMIN_PASSWORD is not set. Dashboard is locked.")
+        st.stop()
+    st.title("🔒 Login Required")
+    st.text_input("Enter Admin Password:", type="password", key="password_input", on_change=check_password)
+    st.stop()
+
 MAKE_WEBHOOK_URL = os.getenv("MAKE_WEBHOOK_URL")
 DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
