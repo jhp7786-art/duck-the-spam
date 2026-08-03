@@ -463,7 +463,11 @@ async def voicemail_complete(
 
 
 @app.post("/slack/interactivity", dependencies=[Depends(validate_slack_request)])
-async def slack_interactivity(payload: str = Form(...)):
+async def slack_interactivity(request: Request):
+    form_data = await request.form()
+    payload = form_data.get("payload")
+    if not payload:
+        return Response(status_code=400)
     try:
         data = json.loads(payload)
     except json.JSONDecodeError:
