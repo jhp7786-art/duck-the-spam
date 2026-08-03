@@ -1,6 +1,7 @@
 import os
 import random
 import urllib.parse
+import json
 import psycopg2
 import requests 
 from fastapi import FastAPI, Form, Response
@@ -403,3 +404,84 @@ async def voicemail_complete(
     response.hangup()
     
     return Response(content=str(response), media_type="application/xml")
+
+class WebLead(BaseModel):
+    name: str
+    phone: str
+    address: str
+    appliance: str
+    issue: str
+
+@app.post("/web-lead")
+async def create_web_lead(lead: WebLead):
+    conn = get_db_connection()
+    lead_id = None
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO leads (phone, appliance, issue, status) VALUES (%s, %s, %s, %s) RETURNING id",
+                    (lead.phone, lead.appliance, lead.issue, 'Awaiting Booking')
+                )
+                lead_id = cur.fetchone()[0]
+    except Exception as e:
+        print(f"Error inserting web lead: {e}")
+        return Response(content="Database Error", status_code=500)
+    finally:
+        conn.close()
+
+    # Forward to Make.com Webhook
+    payload = {
+        "name": lead.name,
+        "phone": lead.phone,
+        "address": lead.address,
+        "appliance": lead.appliance,
+        "issue": lead.issue,
+        "lead_id": lead_id
+    }
+    
+    make_webhook = os.getenv("MAKE_WEBHOOK_URL")
+    if make_webhook:
+        try:
+            requests.post(make_webhook, json=payload)
+        except Exception as e:
+            print(f"Failed to forward to Make webhook: {e}")
+
+    return {"lead_id": lead_id}
+
+@app.post("/slack/interactivity")
+async def slack_interactivity(payload: str = Form(...)):
+    try:
+        data = json.loads(payload)
+    except json.JSONDecodeError:
+        return Response(status_code=400)
+        
+    actions = data.get("actions", [])
+    if not actions:
+        return Response(status_code=400)
+        
+    action = actions[0]
+    action_id = action.get("action_id")
+    value = action.get("value")
+    
+    if action_id in ["schedule_lead", "cancel_lead"] and value:
+        lead_id = int(value)
+        new_status = "Scheduled" if action_id == "schedule_lead" else "Canceled"
+        
+        conn = get_db_connection()
+        try:
+            with conn:
+                with conn.cursor() as cur:
+                    cur.execute("UPDATE leads SET status = %s WHERE id = %s", (new_status, lead_id))
+        except Exception as e:
+            print(f"Error updating lead status: {e}")
+        finally:
+            conn.close()
+            
+        # Return updated message block to Slack
+        return {
+            "replace_original": True,
+            "text": f"✅ Lead {lead_id} status updated to {new_status}."
+        }
+        
+    return Response(status_code=400)
