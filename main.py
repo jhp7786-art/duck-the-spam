@@ -49,7 +49,17 @@ CARRIER_GATEWAY = os.getenv("CARRIER_GATEWAY")
 VIP_NUMBERS = [
     os.getenv("MY_REAL_PHONE_NUMBER")
 ]
+from fastapi.middleware.cors import CORSMiddleware
+
 app = FastAPI(title=f"{COMPANY_NAME} Dispatch System", description="Automated client dispatch and call screening service.")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"], 
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 class LeadPayload(BaseModel):
     phone: str
