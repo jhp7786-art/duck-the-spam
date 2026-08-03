@@ -4,7 +4,7 @@ import urllib.parse
 import json
 import psycopg2
 import requests 
-from fastapi import FastAPI, Form, Response
+from fastapi import FastAPI, Form, Response, Header, HTTPException
 from twilio.twiml.voice_response import VoiceResponse, Gather
 from dotenv import load_dotenv
 from pydantic import BaseModel
@@ -16,6 +16,7 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
     raise ValueError("DATABASE_URL environment variable is not set. Please define it in your environment or .env file.")
 SLACK_WEBHOOK_URL = os.getenv("SLACK_WEBHOOK_URL", "") 
+API_SECRET_KEY = os.getenv("API_SECRET_KEY")
 COMPANY_NAME = os.getenv("COMPANY_NAME", "New Life Appliance Repair")
 
 def get_db_connection():
@@ -59,8 +60,11 @@ class LeadPayload(BaseModel):
     address: str = "Unknown"
 
 @app.post("/log-lead")
-async def log_lead(payload: LeadPayload):
+async def log_lead(payload: LeadPayload, x_api_key: str = Header(None)):
     """Logs incoming leads into PostgreSQL and returns the lead_id."""
+    if not API_SECRET_KEY or x_api_key != API_SECRET_KEY:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+        
     conn = get_db_connection()
     try:
         with conn:
