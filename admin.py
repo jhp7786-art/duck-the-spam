@@ -326,11 +326,11 @@ with tab_logs:
         
         if submit_btn:
             payload = {
-                "Name": caller_name,
-                "Phone": caller_phone,
-                "Address": address,
-                "Appliance": appliance,
-                "Issue": issue
+                "name": caller_name,
+                "phone": caller_phone,
+                "address": address,
+                "appliance": appliance,
+                "issue": issue
             }
             try:
                 response = requests.post(MAKE_WEBHOOK_URL, json=payload)
