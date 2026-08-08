@@ -98,15 +98,40 @@ def ensure_db():
                     VALUES ('spam_protocol', 'JOHN')
                     ON CONFLICT (key) DO NOTHING
                 """)
+                
+                # Create leads table with the requested schema
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS leads (
                         id SERIAL PRIMARY KEY,
+                        name VARCHAR,
                         phone VARCHAR,
+                        address VARCHAR,
                         appliance VARCHAR,
                         issue VARCHAR,
-                        status VARCHAR DEFAULT 'Awaiting Booking',
-                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                        status VARCHAR DEFAULT 'new',
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                     )
+                """)
+                # Migrations to support preexisting database structures
+                cur.execute("ALTER TABLE leads ADD COLUMN IF NOT EXISTS name VARCHAR;")
+                cur.execute("ALTER TABLE leads ADD COLUMN IF NOT EXISTS address VARCHAR;")
+                cur.execute("ALTER TABLE leads ADD COLUMN IF NOT EXISTS status VARCHAR DEFAULT 'new';")
+                cur.execute("ALTER TABLE leads ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP;")
+                
+                # Create availability table
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS availability (
+                        id SERIAL PRIMARY KEY,
+                        time_slot VARCHAR UNIQUE,
+                        is_open BOOLEAN DEFAULT TRUE
+                    )
+                """)
+                # Seed default availability slots
+                cur.execute("""
+                    INSERT INTO availability (time_slot, is_open)
+                    VALUES ('Today', TRUE), ('Tomorrow AM', TRUE), ('Tomorrow PM', TRUE)
+                    ON CONFLICT (time_slot) DO NOTHING
                 """)
     finally:
         conn.close()
@@ -214,7 +239,7 @@ with tab_leads:
                 column_config={
                     "Status": st.column_config.SelectboxColumn(
                         "Status",
-                        options=["Awaiting Booking", "Scheduled", "Completed", "Canceled", "Declined", "Offer Today Sent", "Offer AM Sent", "Offer PM Sent", "Link Sent"],
+                        options=["new", "Awaiting Booking", "Scheduled", "Completed", "Canceled", "offered_today", "offered_am", "offered_pm", "link_sent", "declined"],
                         required=True,
                     )
                 },
