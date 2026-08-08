@@ -10,6 +10,7 @@ import time
 from fastapi import FastAPI, Form, Response, Header, HTTPException, Request, Depends
 from twilio.twiml.voice_response import VoiceResponse, Gather
 from twilio.request_validator import RequestValidator
+from twilio.rest import Client
 from dotenv import load_dotenv
 from pydantic import BaseModel
 
@@ -24,6 +25,9 @@ API_SECRET_KEY = os.getenv("API_SECRET_KEY")
 COMPANY_NAME = os.getenv("COMPANY_NAME", "New Life Appliance Repair")
 
 TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN", "")
+TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID", "")
+TWILIO_PHONE_NUMBER = os.getenv("TWILIO_PHONE_NUMBER", "")
+SCHEDULING_LINK = os.getenv("SCHEDULING_LINK", "https://newlifeappliance.com/schedule")
 twilio_validator = RequestValidator(TWILIO_AUTH_TOKEN)
 
 SLACK_SIGNING_SECRET = os.getenv("SLACK_SIGNING_SECRET", "")
@@ -481,24 +485,108 @@ async def slack_interactivity(request: Request):
     action_id = action.get("action_id")
     value = action.get("value")
     
-    if action_id in ["schedule_lead", "cancel_lead"] and value:
-        lead_id = int(value)
-        new_status = "Scheduled" if action_id == "schedule_lead" else "Canceled"
+    valid_actions = [
+        "schedule_lead", "cancel_lead", 
+        "offer_today", "offer_am", "offer_pm", 
+        "send_link", "decline_lead"
+    ]
+    if action_id in valid_actions and value:
+        try:
+            lead_id = int(value)
+        except ValueError:
+            return Response(content="Invalid lead ID format", status_code=400)
+            
+        conn = get_db_connection()
+        lead_phone = None
+        lead_appliance = "Appliance"
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT phone, appliance FROM leads WHERE id = %s", (lead_id,))
+                row = cur.fetchone()
+                if row:
+                    lead_phone, lead_appliance = row
+        except Exception as e:
+            print(f"Error fetching lead from DB: {e}")
+            return {
+                "replace_original": False,
+                "text": f"⚠️ Database error when fetching lead {lead_id}: {str(e)}"
+            }
+        finally:
+            conn.close()
+            
+        if not lead_phone:
+            return {
+                "replace_original": False,
+                "text": f"⚠️ Error: Lead {lead_id} not found in the database."
+            }
+            
+        new_status = None
+        sms_body = None
         
+        if action_id == "schedule_lead":
+            new_status = "Scheduled"
+        elif action_id == "cancel_lead":
+            new_status = "Canceled"
+        elif action_id == "offer_today":
+            new_status = "Offer Today Sent"
+            sms_body = f"Hi, this is {COMPANY_NAME}. We have an open slot today for your {lead_appliance} repair. Would you like to schedule today's arrival window?"
+        elif action_id == "offer_am":
+            new_status = "Offer AM Sent"
+            sms_body = f"Hi, this is {COMPANY_NAME}. We have an open slot tomorrow morning for your {lead_appliance} repair. Would you like to schedule?"
+        elif action_id == "offer_pm":
+            new_status = "Offer PM Sent"
+            sms_body = f"Hi, this is {COMPANY_NAME}. We have an open slot tomorrow afternoon for your {lead_appliance} repair. Would you like to schedule?"
+        elif action_id == "send_link":
+            new_status = "Link Sent"
+            sms_body = f"Hi, this is {COMPANY_NAME}. Please use the following link to schedule your {lead_appliance} repair: {SCHEDULING_LINK}"
+        elif action_id == "decline_lead":
+            new_status = "Declined"
+            
+        sms_sent_success = False
+        if sms_body:
+            try:
+                if TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN:
+                    twilio_client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+                else:
+                    twilio_client = Client()
+                    
+                from_num = TWILIO_PHONE_NUMBER
+                if not from_num:
+                    raise ValueError("TWILIO_PHONE_NUMBER is not set in environment.")
+                    
+                twilio_client.messages.create(
+                    body=sms_body,
+                    from_=from_num,
+                    to=lead_phone
+                )
+                sms_sent_success = True
+            except Exception as e:
+                print(f"Error sending Twilio SMS: {e}")
+                return {
+                    "replace_original": False,
+                    "text": f"⚠️ Error triggering SMS to Lead {lead_id} ({lead_phone}): {str(e)}"
+                }
+                
         conn = get_db_connection()
         try:
             with conn:
                 with conn.cursor() as cur:
                     cur.execute("UPDATE leads SET status = %s WHERE id = %s", (new_status, lead_id))
         except Exception as e:
-            print(f"Error updating lead status: {e}")
+            print(f"Error updating database: {e}")
+            return {
+                "replace_original": False,
+                "text": f"⚠️ Database error when updating status for lead {lead_id}: {str(e)}"
+            }
         finally:
             conn.close()
             
-        # Return updated message block to Slack
+        slack_msg = f"✅ Lead {lead_id} status updated to {new_status}."
+        if sms_sent_success:
+            slack_msg += f"\n💬 Outbound SMS sent to {lead_phone}."
         return {
             "replace_original": True,
-            "text": f"✅ Lead {lead_id} status updated to {new_status}."
+            "text": slack_msg
         }
         
     return Response(status_code=400)

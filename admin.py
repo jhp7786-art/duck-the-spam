@@ -214,7 +214,7 @@ with tab_leads:
                 column_config={
                     "Status": st.column_config.SelectboxColumn(
                         "Status",
-                        options=["Awaiting Booking", "Scheduled", "Completed", "Canceled"],
+                        options=["Awaiting Booking", "Scheduled", "Completed", "Canceled", "Declined", "Offer Today Sent", "Offer AM Sent", "Offer PM Sent", "Link Sent"],
                         required=True,
                     )
                 },
