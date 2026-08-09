@@ -14,6 +14,7 @@ from twilio.rest import Client
 from dotenv import load_dotenv
 from pydantic import BaseModel
 import logging
+import asyncio
 
 load_dotenv()
 
@@ -788,3 +789,67 @@ async def slack_interactivity(request: Request, background_tasks: BackgroundTask
 
     # Return HTTP 200 immediately
     return Response(status_code=200)
+
+
+async def check_stale_leads():
+    """
+    Queries Neon DB for any leads where status = 'new' and created_at is older than 30 minutes.
+    Sends a Slack alert for every stale lead found.
+    """
+    logger.info("Executing stale lead check...")
+    conn = None
+    stale_leads = []
+    try:
+        conn = get_db_connection()
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT name, phone FROM leads
+                WHERE status = 'new' AND created_at < NOW() - INTERVAL '30 minutes';
+            """)
+            rows = cur.fetchall()
+            stale_leads = [{"name": r[0] or "Unknown", "phone": r[1] or "Unknown"} for r in rows]
+    except Exception as e:
+        logger.error(f"Error querying stale leads from PostgreSQL: {e}")
+    finally:
+        if conn:
+            conn.close()
+
+    if not stale_leads:
+        logger.info("No stale leads found.")
+        return
+
+    logger.info(f"Found {len(stale_leads)} stale leads. Sending notifications...")
+    for lead in stale_leads:
+        name = lead["name"]
+        phone = lead["phone"]
+        alert_text = f"⚠️ *Stale Lead Alert!* Lead *{name}* ({phone}) has been waiting for over 30 minutes!"
+        
+        if SLACK_WEBHOOK_URL:
+            try:
+                r = requests.post(SLACK_WEBHOOK_URL, json={"text": alert_text}, timeout=10)
+                logger.info(f"Stale lead alert sent for {name}. Status: {r.status_code}")
+            except Exception as e:
+                logger.error(f"Failed to post stale lead alert to Slack for {name}: {e}")
+        else:
+            logger.warning(f"SLACK_WEBHOOK_URL not configured. Alert skipped for {name}.")
+
+
+async def check_stale_leads_loop():
+    """
+    Continuous background loop that runs the stale check logic every 15 minutes.
+    """
+    logger.info("Starting stale lead check background loop (every 15 minutes)...")
+    while True:
+        try:
+            await check_stale_leads()
+        except Exception as e:
+            logger.error(f"Exception in check_stale_leads_loop: {e}")
+        await asyncio.sleep(15 * 60)
+
+
+@app.on_event("startup")
+async def startup_event():
+    """
+    FastAPI startup event that launches the background task loop.
+    """
+    asyncio.create_task(check_stale_leads_loop())
