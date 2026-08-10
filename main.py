@@ -22,14 +22,18 @@ load_dotenv()
 DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
     raise ValueError("DATABASE_URL environment variable is not set. Please define it in your environment or .env file.")
-SLACK_WEBHOOK_URL = os.getenv("SLACK_WEBHOOK_URL", "") 
+SLACK_WEBHOOK_URL = os.getenv("SLACK_WEBHOOK_URL", "")
 API_SECRET_KEY = os.getenv("API_SECRET_KEY")
 COMPANY_NAME = os.getenv("COMPANY_NAME", "New Life Appliance Repair")
+# WEB_FORM_URL: client-specific URL sent via SMS when caller presses 2
+WEB_FORM_URL = os.getenv("WEB_FORM_URL", "")
+# MAKE_WEBHOOK_URL: central Make.com scenario endpoint that receives all forwarded payloads
+MAKE_WEBHOOK_URL = os.getenv("MAKE_WEBHOOK_URL", "")
 
 TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN", "")
 TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID", "")
 TWILIO_PHONE_NUMBER = os.getenv("TWILIO_PHONE_NUMBER", "")
-SCHEDULING_LINK = os.getenv("SCHEDULING_LINK", "https://newlifeappliance.com/schedule")
+SCHEDULING_LINK = os.getenv("SCHEDULING_LINK", "")
 twilio_validator = RequestValidator(TWILIO_AUTH_TOKEN)
 
 SLACK_SIGNING_SECRET = os.getenv("SLACK_SIGNING_SECRET", "")
@@ -76,24 +80,7 @@ async def validate_slack_request(request: Request):
 def get_db_connection():
     return psycopg2.connect(DATABASE_URL) 
 
-def get_active_protocol():
-    conn = get_db_connection()
-    try:
-        with conn.cursor() as cur:
-            cur.execute("SELECT value FROM app_settings WHERE key = 'spam_protocol'")
-            row = cur.fetchone()
-            mode = row[0].upper() if row else "JOHN"
-            
-            if mode == "SHUFFLE":
-                chosen = random.choice(["JOHN", "TODDLER", "PARROT", "HAMMER"])
-                print(f"[SHUFFLE] Dynamically selected protocol: {chosen}")
-                return chosen
-            return mode
-    except Exception as e:
-        print(f"Error reading active protocol: {e}")
-        return "JOHN"
-    finally:
-        conn.close() 
+# get_active_protocol() removed — spam defense protocols deprecated.
 
 # Securely loading email and phone info
 GMAIL_ADDRESS = os.getenv("GMAIL_ADDRESS")
@@ -248,14 +235,18 @@ init_db()
 
 @app.post("/incoming-call", dependencies=[Depends(validate_twilio_request)])
 async def handle_incoming_call(From: str = Form(...)):
-    """Step 1: VIP Check, Blacklist Check, and Call Screening."""
+    """
+    Inbound call handler.
+    Checks VIP whitelist → Blacklist → presents a clean DTMF Gather menu.
+    Replaces all previous speech-analysis spam screening logic.
+    """
     response = VoiceResponse()
-    
-    # 1. VIP Bypass (Family/Friends)
+
+    # ── 1. VIP Whitelist Check (preserved) ──────────────────────────────────
     is_vip = False
     vip_name = None
     custom_greeting = None
-    
+
     if From in VIP_NUMBERS:
         is_vip = True
         vip_name = "Jeffery"
@@ -270,231 +261,230 @@ async def handle_incoming_call(From: str = Form(...)):
                 vip_name = row[0]
                 custom_greeting = row[1]
     except Exception as e:
-        print(f"Error checking VIP list: {e}")
+        logger.error(f"Error checking VIP list: {e}")
     finally:
         conn.close()
 
     if is_vip:
         log_call(From, "VIP Bypass", "Routed straight to voicemail")
-        
-        # Determine the greeting message dynamically
         if custom_greeting and custom_greeting.strip():
             greeting_text = custom_greeting.strip()
         elif vip_name and vip_name.strip():
-            greeting_text = f"Hey {vip_name.strip()}, thanks for calling {COMPANY_NAME}. I am currently unavailable. Please leave a message and I will get right back to you."
+            greeting_text = (
+                f"Hey {vip_name.strip()}, thanks for calling {COMPANY_NAME}. "
+                "I am currently unavailable. Please leave a message and I will get right back to you."
+            )
         else:
-            greeting_text = f"Hey, thanks for calling {COMPANY_NAME}. I am currently unavailable. Please leave a message and I will get right back to you."
-            
+            greeting_text = (
+                f"Hey, thanks for calling {COMPANY_NAME}. "
+                "I am currently unavailable. Please leave a message and I will get right back to you."
+            )
         response.say(greeting_text)
-        response.record(max_length=120, action="/voicemail-complete?dept=vip")
+        response.record(max_length=120, action="/voicemail-complete?dept=vip", transcribe=True,
+                        transcribeCallback="/voicemail-complete?dept=vip")
         return Response(content=str(response), media_type="application/xml")
 
-    # 2. Blacklist Check
-    result = None
+    # ── 2. Blacklist Check (preserved) ──────────────────────────────────────
     conn = get_db_connection()
     try:
         with conn.cursor() as cur:
             cur.execute("SELECT 1 FROM blacklist WHERE phone_number = %s", (From,))
             result = cur.fetchone()
     except Exception as e:
-        print(f"Error checking blacklist: {e}")
+        logger.error(f"Error checking blacklist: {e}")
+        result = None
     finally:
         conn.close()
-    
+
     if result:
-        log_call(From, "Blocked Spammer", "Rejected call automatically")
+        log_call(From, "Blocked", "Rejected — number is blacklisted")
         response.reject()
         return Response(content=str(response), media_type="application/xml")
-        
-    # 3. Call Screening Prompt
+
+    # ── 3. DTMF Gather Menu ──────────────────────────────────────────────────
+    # This Gather replaces ALL previous speech-analysis/spam-trap logic.
+    # numDigits=1 captures a single keypress; timeout=5 gives the caller
+    # time to respond before Twilio falls through to the hangup below.
+    log_call(From, "Inbound", "Presented DTMF menu")
     gather = Gather(
-        input="dtmf speech", 
-        action="/process-menu", 
-        method="POST", 
-        numDigits=1, 
-        timeout=4
+        input="dtmf",
+        action="/gather-result",
+        method="POST",
+        numDigits=1,
+        timeout=5,
     )
-    
     gather.say(
-        f"You have reached {COMPANY_NAME}. "
-        "Please state your name and the purpose of your call."
+        f"Thank you for calling {COMPANY_NAME}. "
+        "Press 1 to leave a voicemail. "
+        "Press 2 to receive a text message with a link to our website form."
     )
     response.append(gather)
-    
-    response.say("No input detected. Goodbye.")
+
+    # Fallback if the caller does not press anything
+    response.say("We did not receive any input. Goodbye.")
     response.hangup()
-    
     return Response(content=str(response), media_type="application/xml")
 
-@app.post("/process-menu", dependencies=[Depends(validate_twilio_request)])
-async def process_menu(From: str = Form(...), Digits: str = Form(None), SpeechResult: str = Form(None)):
-    """Step 2: Analyze speech for spam or route cleared callers."""
+
+@app.post("/gather-result", dependencies=[Depends(validate_twilio_request)])
+async def gather_result(
+    From: str = Form(...),
+    Digits: str = Form(None),
+) -> Response:
+    """
+    Handles the DTMF keypress from /incoming-call's Gather block.
+      1 → record a transcribed voicemail (forwarded to Make on completion)
+      2 → send an SMS containing WEB_FORM_URL and hang up
+    """
     response = VoiceResponse()
 
-    # --- SPAM SCREENING ---
-    if not SpeechResult:
-        log_call(From, "No Input / Timeout", "No speech detected")
-        response.say("I did not catch that. Goodbye.")
-        response.hangup()
-        return Response(content=str(response), media_type="application/xml")
-        
-    transcript = SpeechResult.lower()
-    trigger_words = ["loan", "funding", "business advance", "pre-approved", "capital", "financing"]
-    
-    if any(word in transcript for word in trigger_words) or "warranty" in transcript:
-        # Log the spammer
-        conn = get_db_connection()
-        try:
-            with conn:
-                with conn.cursor() as cur:
-                    cur.execute(
-                        "INSERT INTO blacklist (phone_number, reason) VALUES (%s, %s) ON CONFLICT (phone_number) DO NOTHING",
-                        (From, f"Caught: '{SpeechResult}'")
-                    )
-        except Exception as e:
-            print(f"Error blacklisting spammer: {e}")
-        finally:
-            conn.close()
-            
-        active_protocol = get_active_protocol()
-        log_call(From, f"Spam ({active_protocol})", f"Trigger word matched: '{SpeechResult}'")
-        
-        if active_protocol == "JOHN":
-            encoded_speech = urllib.parse.quote(SpeechResult)
-            response.redirect(f"/protocol-john?SpeechResult={encoded_speech}")
-        elif active_protocol == "TODDLER":
-            response.redirect("/protocol-toddler")
-        elif active_protocol == "PARROT":
-            encoded_speech = urllib.parse.quote(SpeechResult)
-            response.redirect(f"/protocol-parrot?phrase={encoded_speech}")
+    if Digits == "1":
+        # ── Option 1: Voicemail ──────────────────────────────────────────────
+        log_call(From, "Voicemail", "Caller chose to leave a voicemail")
+        response.say(
+            "Please leave your message after the tone. "
+            "Press the pound key or hang up when you are finished."
+        )
+        # transcribeCallback fires when Twilio finishes transcribing;
+        # that webhook hit is handled by /voicemail-complete and forwarded to Make.
+        response.record(
+            max_length=120,
+            finish_on_key="#",
+            action="/voicemail-complete?dept=caller",
+            transcribe=True,
+            transcribeCallback="/voicemail-complete?dept=caller",
+        )
+
+    elif Digits == "2":
+        # ── Option 2: SMS web-form link ──────────────────────────────────────
+        # SMS body driven entirely by env vars so it is safe to clone per client.
+        log_call(From, "SMS Link", "Caller requested web form link via SMS")
+        sms_body = (
+            f"Hi, this is {COMPANY_NAME}. "
+            f"Please fill out our request form here: {WEB_FORM_URL}. "
+            "Reply STOP to unsubscribe."
+        )
+        if TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN and TWILIO_PHONE_NUMBER:
+            try:
+                twilio_client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+                twilio_client.messages.create(
+                    body=sms_body,
+                    from_=TWILIO_PHONE_NUMBER,
+                    to=From,
+                )
+                logger.info(f"Web-form SMS sent to {From}")
+            except Exception as e:
+                logger.error(f"Failed to send web-form SMS to {From}: {e}")
         else:
-            response.redirect("/protocol-hammer")
-            
+            logger.warning("Twilio credentials not fully configured — SMS skipped")
+
+        # ── Make.com Handoff: SMS event ──────────────────────────────────────
+        # Package the interaction as a clean JSON dict and fire it at Make.
+        # The 5-second timeout prevents this thread from hanging if Make is down.
+        _forward_to_make({
+            "event": "sms_link_sent",
+            "phone": From,
+            "company": COMPANY_NAME,
+            "web_form_url": WEB_FORM_URL,
+        })
+
+        response.say(
+            f"Perfect. We are sending a text message to your number now. Goodbye."
+        )
+        response.hangup()
+
     else:
-        # Unknown but potentially legitimate caller who spoke
-        log_call(From, "Unknown (Speech)", f"Spoke: '{SpeechResult}'")
-        response.say(f"Your call has been cleared, but the person you are trying to reach at {COMPANY_NAME} is unavailable. Please leave a message.")
-        response.record(max_length=120, action="/voicemail-complete?dept=cleared")
-        
-    return Response(content=str(response), media_type="application/xml")
-
-
-@app.post("/incoming-sms", dependencies=[Depends(validate_twilio_request)])
-async def incoming_sms(From: str = Form(...), Body: str = Form(...)):
-    """Catch incoming texts and send a push notification to Slack."""
-    
-    if SLACK_WEBHOOK_URL:
-        slack_payload = {
-            "text": f"🚨 *New {COMPANY_NAME} Lead*\n*Number:* {From}\n*Message:* {Body}"
-        }
-        try:
-            requests.post(SLACK_WEBHOOK_URL, json=slack_payload)
-        except Exception as e:
-            print(f"Failed to send Slack alert: {e}")
-            
-    # Return an empty XML response so Twilio doesn't try to send an SMS reply
-    return Response(content="<Response></Response>", media_type="application/xml")
-
-
-# ==========================================
-# DEFENSE PROTOCOLS
-# ==========================================
-
-@app.post("/protocol-john", dependencies=[Depends(validate_twilio_request)])
-async def protocol_john(SpeechResult: str = None):
-    response = VoiceResponse()
-    caller_name = ""
-    if SpeechResult:
-        transcript = urllib.parse.unquote(SpeechResult).lower()
-        if "this is " in transcript:
-            parts = transcript.split("this is ")
-            if len(parts) > 1 and parts[1].strip(): caller_name = parts[1].split()[0] 
-        elif "name is " in transcript:
-            parts = transcript.split("name is ")
-            if len(parts) > 1 and parts[1].strip(): caller_name = parts[1].split()[0]
-            
-    greeting_name = f", {caller_name.capitalize()}," if caller_name else ","
-    response.say(f"Oh thank god{greeting_name} I am so glad we found you! We have been trying to reach you about your extended car warranty!", voice="Polly.Matthew-Neural", language="en-US")
-    response.say("Wonk, wonk, wonk.", voice="Polly.Matthew-Neural", language="en-US")
-    response.hangup()
-    return Response(content=str(response), media_type="application/xml")
-
-@app.post("/protocol-hammer", dependencies=[Depends(validate_twilio_request)])
-async def protocol_hammer():
-    response = VoiceResponse()
-    response.say("You have reached a restricted number. Remove this number from your dialer immediately. Goodbye.")
-    response.hangup()
-    return Response(content=str(response), media_type="application/xml")
-
-@app.post("/protocol-toddler", dependencies=[Depends(validate_twilio_request)])
-async def protocol_toddler(SpeechResult: str = Form(None)):
-    response = VoiceResponse()
-    if not SpeechResult:
-        response.say("That is what I thought. Goodbye.")
+        # Unrecognised keypress
+        log_call(From, "Invalid Input", f"Caller pressed: {Digits}")
+        response.say("That was not a valid option. Please call back and try again. Goodbye.")
         response.hangup()
-        return Response(content=str(response), media_type="application/xml")
-    gather = Gather(input="speech", action="/protocol-toddler", method="POST", timeout=3)
-    gather.say("Why?")
-    response.append(gather)
+
     return Response(content=str(response), media_type="application/xml")
 
-@app.post("/protocol-parrot", dependencies=[Depends(validate_twilio_request)])
-async def protocol_parrot(phrase: str = None, SpeechResult: str = Form(None)):
-    response = VoiceResponse()
-    text_to_parrot = SpeechResult if SpeechResult else phrase
-    if not text_to_parrot:
-        response.say("Cat got your tongue? Goodbye.")
-        response.hangup()
-        return Response(content=str(response), media_type="application/xml")
-    gather = Gather(input="speech", action="/protocol-parrot", method="POST", timeout=3)
-    gather.say(text_to_parrot)
-    response.append(gather)
-    return Response(content=str(response), media_type="application/xml")
+
+def _forward_to_make(payload: dict) -> None:
+    """
+    Shared helper that POSTs a JSON payload to MAKE_WEBHOOK_URL.
+    Wrapped in try/except with a hard 5-second timeout so a Make.com
+    outage never blocks or crashes the FastAPI response thread.
+    """
+    if not MAKE_WEBHOOK_URL:
+        logger.warning("MAKE_WEBHOOK_URL not configured — skipping Make forward")
+        return
+    try:
+        # ── Make.com Webhook Handoff ─────────────────────────────────────────
+        r = requests.post(MAKE_WEBHOOK_URL, json=payload, timeout=5)
+        logger.info(f"Make webhook forwarded. Status: {r.status_code} | Payload keys: {list(payload.keys())}")
+    except requests.exceptions.Timeout:
+        logger.error("Make webhook timed out after 5 seconds — payload dropped")
+    except Exception as e:
+        logger.error(f"Make webhook forward failed: {e}")
+
 
 import smtplib
 from email.message import EmailMessage
 
+
 @app.post("/voicemail-complete", dependencies=[Depends(validate_twilio_request)])
 async def voicemail_complete(
-    dept: str = None, 
-    From: str = Form(None), 
-    RecordingUrl: str = Form(None)
-):
-    """Catches the finished voicemail and routes alerts."""
-    
+    dept: str = None,
+    From: str = Form(None),
+    RecordingUrl: str = Form(None),
+    TranscriptionText: str = Form(None),
+    TranscriptionStatus: str = Form(None),
+) -> Response:
+    """
+    Fires when Twilio finishes recording (and optionally transcribing) a voicemail.
+    Packages all available data into a clean dict and forwards it to Make.com.
+    The Gmail/SMTP carrier-gateway alert is preserved for VIP callers.
+    """
+    logger.info(f"voicemail-complete: dept={dept}, from={From}, transcription_status={TranscriptionStatus}")
+
+    # ── VIP/cleared email alert (preserved) ─────────────────────────────────
     if dept in ["vip", "cleared"]:
         try:
             if dept == "vip":
                 subject = f"{COMPANY_NAME} - VIP Call Alert"
-                content = f"🔴 VIP Caller {From} left a message. Listen: {RecordingUrl}"
+                content = f"\U0001f534 VIP Caller {From} left a message. Listen: {RecordingUrl}"
             else:
                 subject = f"{COMPANY_NAME} - Cleared Call Alert"
-                content = f"🟢 Cleared Caller {From} left a message. Listen: {RecordingUrl}"
+                content = f"\U0001f7e2 Cleared Caller {From} left a message. Listen: {RecordingUrl}"
 
             msg = EmailMessage()
             msg.set_content(content)
-            msg['Subject'] = subject
-            msg['From'] = GMAIL_ADDRESS
-            msg['To'] = CARRIER_GATEWAY
-            
-            server = smtplib.SMTP('smtp.gmail.com', 587)
+            msg["Subject"] = subject
+            msg["From"] = GMAIL_ADDRESS
+            msg["To"] = CARRIER_GATEWAY
+
+            server = smtplib.SMTP("smtp.gmail.com", 587)
             server.starttls()
             server.login(GMAIL_ADDRESS, GMAIL_APP_PASSWORD)
             server.send_message(msg)
             server.quit()
         except Exception as e:
-            print(f"Failed to send SMS Alert: {e}")
+            logger.error(f"Failed to send VIP/cleared SMS alert: {e}")
 
-    # Always hang up gracefully
+    # ── Make.com Handoff: voicemail payload ─────────────────────────────────
+    # This is the primary handoff point for all completed voicemails.
+    # Every field Twilio sends is packaged here; Make can route/filter downstream.
+    _forward_to_make({
+        "event": "voicemail_complete",
+        "dept": dept,
+        "phone": From,
+        "recording_url": RecordingUrl,
+        "transcription_text": TranscriptionText,
+        "transcription_status": TranscriptionStatus,
+        "company": COMPANY_NAME,
+    })
+
+    # Graceful TwiML close — only needed when Twilio calls the action URL,
+    # not the transcribeCallback URL (which expects a 200 with empty body).
     response = VoiceResponse()
     response.say("Thank you. Your message has been saved. Goodbye.")
     response.hangup()
-    
     return Response(content=str(response), media_type="application/xml")
 
 
-# Configure logger
-logger = logging.getLogger(__name__)
 
 class NewLeadPayload(BaseModel):
     name: str
