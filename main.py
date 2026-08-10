@@ -1,22 +1,23 @@
 import os
-import random
-import urllib.parse
 import json
 import psycopg2
-import requests 
+import requests
 import hmac
 import hashlib
 import time
+import logging
+import asyncio
 from fastapi import FastAPI, Form, Response, Header, HTTPException, Request, Depends, BackgroundTasks
 from twilio.twiml.voice_response import VoiceResponse, Gather
 from twilio.request_validator import RequestValidator
 from twilio.rest import Client
 from dotenv import load_dotenv
 from pydantic import BaseModel
-import logging
-import asyncio
 
 load_dotenv()
+
+# Module-level logger — available to all functions below
+logger = logging.getLogger(__name__)
 
 # --- CONFIGURATION ---
 DATABASE_URL = os.getenv("DATABASE_URL")
@@ -389,7 +390,7 @@ async def gather_result(
         })
 
         response.say(
-            f"Perfect. We are sending a text message to your number now. Goodbye."
+            "Perfect. We are sending a text message to your number now. Goodbye."
         )
         response.hangup()
 
