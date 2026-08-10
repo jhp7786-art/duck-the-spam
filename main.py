@@ -1,12 +1,14 @@
 import os
 import json
-import psycopg2
-import requests
 import hmac
 import hashlib
 import time
 import logging
 import asyncio
+import smtplib
+from email.message import EmailMessage
+import psycopg2
+import requests
 from fastapi import FastAPI, Form, Response, Header, HTTPException, Request, Depends, BackgroundTasks
 from twilio.twiml.voice_response import VoiceResponse, Gather
 from twilio.request_validator import RequestValidator
@@ -38,6 +40,9 @@ SCHEDULING_LINK = os.getenv("SCHEDULING_LINK", "")
 twilio_validator = RequestValidator(TWILIO_AUTH_TOKEN)
 
 SLACK_SIGNING_SECRET = os.getenv("SLACK_SIGNING_SECRET", "")
+# Facebook webhook security tokens
+FACEBOOK_VERIFY_TOKEN = os.getenv("FACEBOOK_VERIFY_TOKEN", "")
+FACEBOOK_APP_SECRET = os.getenv("FACEBOOK_APP_SECRET", "")
 
 async def validate_twilio_request(request: Request):
     if not TWILIO_AUTH_TOKEN:
@@ -95,9 +100,10 @@ VIP_NUMBERS = [
 app = FastAPI(title=f"{COMPANY_NAME} Dispatch System", description="Automated client dispatch and call screening service.")
 
 class LeadPayload(BaseModel):
+    """Unified lead model used by /new-lead, /carrd-lead, and /log-lead."""
     phone: str
-    appliance: str
-    issue: str
+    appliance: str = "Unknown"
+    issue: str = ""
     name: str = "Unknown"
     address: str = "Unknown"
 
@@ -165,11 +171,7 @@ def init_db():
                         value VARCHAR
                     )
                 """)
-                cur.execute("""
-                    INSERT INTO app_settings (key, value)
-                    VALUES ('spam_protocol', 'JOHN')
-                    ON CONFLICT (key) DO NOTHING
-                """)
+                # spam_protocol seed removed — defense protocols deprecated.
                 
                 # Create leads table with the requested schema
                 cur.execute("""
@@ -422,9 +424,6 @@ def _forward_to_make(payload: dict) -> None:
         logger.error(f"Make webhook forward failed: {e}")
 
 
-import smtplib
-from email.message import EmailMessage
-
 
 @app.post("/voicemail-complete", dependencies=[Depends(validate_twilio_request)])
 async def voicemail_complete(
@@ -487,21 +486,18 @@ async def voicemail_complete(
 
 
 
-class NewLeadPayload(BaseModel):
-    name: str
-    phone: str
-    address: str
-    appliance: str
-    issue: str
-
 @app.post("/new-lead")
-async def receive_new_lead(payload: NewLeadPayload):
+async def receive_new_lead(payload: LeadPayload, x_api_key: str = Header(None)):
     """
-    Endpoint 1: Receive New Lead
-    - Inserts lead data into the leads table in PostgreSQL.
-    - Queries active availability from the availability table.
-    - Sends a dynamic Slack Block Kit message with interactive buttons.
+    Ingress for internal services sending new leads (e.g., Make.com internal HTTP module).
+    - Validates API key (X-API-Key header).
+    - Python owns the DB insert and availability query.
+    - Forwards a clean structured payload to Make.com for Slack card + calendar workflows.
     """
+    if not API_SECRET_KEY or x_api_key != API_SECRET_KEY:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    # ── DB Insert ────────────────────────────────────────────────────────────
     conn = get_db_connection()
     lead_id = None
     try:
@@ -514,106 +510,186 @@ async def receive_new_lead(payload: NewLeadPayload):
                 """, (payload.name, payload.phone, payload.address, payload.appliance, payload.issue))
                 lead_id = cur.fetchone()[0]
     except Exception as e:
-        logger.error(f"Failed to log new lead in database: {e}")
+        logger.error(f"Failed to insert new lead into DB: {e}")
         raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
     finally:
         conn.close()
 
-    # Query availability
+    # ── Availability Query (Python owns this — not Make) ──────────────────────────
     available_slots = []
     conn = get_db_connection()
     try:
         with conn.cursor() as cur:
             cur.execute("SELECT time_slot FROM availability WHERE is_open = TRUE;")
-            rows = cur.fetchall()
-            available_slots = [r[0] for r in rows]
+            available_slots = [r[0] for r in cur.fetchall()]
     except Exception as e:
         logger.error(f"Failed to query availability: {e}")
     finally:
         conn.close()
 
-    # Dynamic action buttons mapping
-    slot_mapping = {
-        "Today": {"action_id": "offer_today", "text": "Offer Today"},
-        "Tomorrow AM": {"action_id": "offer_am", "text": "Offer Tomorrow AM"},
-        "Tomorrow PM": {"action_id": "offer_pm", "text": "Offer Tomorrow PM"},
-    }
-
-    action_elements = []
-    
-    # Add buttons for open slots
-    for slot in available_slots:
-        if slot in slot_mapping:
-            action_elements.append({
-                "type": "button",
-                "text": {
-                    "type": "plain_text",
-                    "text": slot_mapping[slot]["text"]
-                },
-                "action_id": slot_mapping[slot]["action_id"],
-                "value": str(lead_id)
-            })
-
-    # Add static buttons
-    action_elements.append({
-        "type": "button",
-        "text": {
-            "type": "plain_text",
-            "text": "Send Scheduling Link"
+    # ── Make.com Handoff ──────────────────────────────────────────────────────
+    # Python hands off the clean payload to Make. Make owns:
+    # - Building the Slack Block Kit interactive card
+    # - Any CRM or calendar actions
+    # The available_slots list tells Make which offer buttons to render.
+    _forward_to_make({
+        "event": "new_lead",
+        "lead_id": lead_id,
+        "lead": {
+            "name": payload.name,
+            "phone": payload.phone,
+            "address": payload.address,
+            "appliance": payload.appliance,
+            "issue": payload.issue,
         },
-        "action_id": "send_link",
-        "value": str(lead_id)
-    })
-    action_elements.append({
-        "type": "button",
-        "text": {
-            "type": "plain_text",
-            "text": "Decline Lead"
-        },
-        "style": "danger",
-        "action_id": "decline_lead",
-        "value": str(lead_id)
+        "available_slots": available_slots,
+        "company": COMPANY_NAME,
     })
 
-    slack_blocks = [
-        {
-            "type": "header",
-            "text": {
-                "type": "plain_text",
-                "text": "🚨 New Appliance Repair Lead"
-            }
-        },
-        {
-            "type": "section",
-            "fields": [
-                {"type": "mrkdwn", "text": f"*Name:*\n{payload.name}"},
-                {"type": "mrkdwn", "text": f"*Phone:*\n{payload.phone}"},
-                {"type": "mrkdwn", "text": f"*Address:*\n{payload.address}"},
-                {"type": "mrkdwn", "text": f"*Appliance:*\n{payload.appliance}"}
-            ]
-        },
-        {
-            "type": "section",
-            "text": {
-                "type": "mrkdwn",
-                "text": f"*Issue:*\n{payload.issue}"
-            }
-        },
-        {
-            "type": "actions",
-            "elements": action_elements
-        }
-    ]
+    return {"status": "success", "lead_id": lead_id}
 
-    # Post message to Slack webhook
-    if SLACK_WEBHOOK_URL:
-        try:
-            r = requests.post(SLACK_WEBHOOK_URL, json={"blocks": slack_blocks}, timeout=10)
-            logger.info(f"Posted lead {lead_id} message to Slack. Status: {r.status_code}")
-        except Exception as e:
-            logger.error(f"Failed to post lead message to Slack: {e}")
-    else:
-        logger.warning("SLACK_WEBHOOK_URL not configured. Skipped posting to Slack.")
+
+@app.post("/carrd-lead")
+async def carrd_lead(payload: LeadPayload, x_api_key: str = Header(None)):
+    """
+    Ingress for Carrd form submissions.
+    Python is the sole receiver — validates API key, inserts into DB, forwards to Make.
+    """
+    if not API_SECRET_KEY or x_api_key != API_SECRET_KEY:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    conn = get_db_connection()
+    lead_id = None
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO leads (name, phone, address, appliance, issue, status)
+                    VALUES (%s, %s, %s, %s, %s, 'new')
+                    RETURNING id;
+                """, (payload.name, payload.phone, payload.address, payload.appliance, payload.issue))
+                lead_id = cur.fetchone()[0]
+    except Exception as e:
+        logger.error(f"Carrd lead DB insert failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+    finally:
+        conn.close()
+
+    # ── Make.com Handoff: Carrd lead ────────────────────────────────────────────
+    _forward_to_make({
+        "event": "carrd_lead",
+        "lead_id": lead_id,
+        "lead": {
+            "name": payload.name,
+            "phone": payload.phone,
+            "address": payload.address,
+            "appliance": payload.appliance,
+            "issue": payload.issue,
+        },
+        "company": COMPANY_NAME,
+    })
+
+    return {"status": "success", "lead_id": lead_id}
+
+
+@app.get("/facebook-lead")
+async def facebook_lead_verify(request: Request):
+    """
+    Facebook webhook verification challenge.
+    Facebook sends GET with hub.mode, hub.verify_token, hub.challenge.
+    Returns hub.challenge plain-text if the token matches FACEBOOK_VERIFY_TOKEN.
+    """
+    # Facebook uses dot-notation params (‘hub.mode’) which must be read from
+    # the raw query string rather than FastAPI path params.
+    params = dict(request.query_params)
+    hub_mode = params.get("hub.mode")
+    hub_verify_token = params.get("hub.verify_token")
+    hub_challenge = params.get("hub.challenge", "")
+
+    if hub_mode == "subscribe" and hub_verify_token == FACEBOOK_VERIFY_TOKEN:
+        logger.info("Facebook webhook verification successful.")
+        return Response(content=hub_challenge, media_type="text/plain")
+
+    logger.warning("Facebook webhook verification failed — token mismatch or bad mode.")
+    raise HTTPException(status_code=403, detail="Verification token mismatch")
+
+
+@app.post("/facebook-lead")
+async def facebook_lead_webhook(request: Request):
+    """
+    Ingress for Facebook Lead Ads webhook payloads.
+    Validates using X-Hub-Signature-256 (HMAC-SHA256 with FACEBOOK_APP_SECRET).
+    Extracts field_data from the Facebook entry structure, inserts lead, forwards to Make.
+    """
+    raw_body = await request.body()
+
+    # ── Facebook X-Hub-Signature-256 Validation ────────────────────────────────
+    # Facebook sends its own HMAC signature header instead of an API key.
+    if FACEBOOK_APP_SECRET:
+        sig_header = request.headers.get("X-Hub-Signature-256", "")
+        if not sig_header.startswith("sha256="):
+            raise HTTPException(status_code=403, detail="Missing Facebook signature header")
+        expected_sig = "sha256=" + hmac.new(
+            FACEBOOK_APP_SECRET.encode("utf-8"),
+            raw_body,
+            hashlib.sha256
+        ).hexdigest()
+        if not hmac.compare_digest(expected_sig, sig_header):
+            raise HTTPException(status_code=403, detail="Invalid Facebook signature")
+
+    try:
+        body = json.loads(raw_body)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON payload")
+
+    # ── Extract lead fields from Facebook's nested structure ─────────────────────
+    # Structure: body.entry[0].changes[0].value.field_data (list of {name, values})
+    lead_fields: dict = {}
+    try:
+        field_data = body["entry"][0]["changes"][0]["value"]["field_data"]
+        for field in field_data:
+            lead_fields[field["name"]] = field["values"][0] if field.get("values") else ""
+    except (KeyError, IndexError, TypeError) as e:
+        logger.error(f"Failed to parse Facebook lead payload structure: {e}")
+        raise HTTPException(status_code=400, detail="Malformed Facebook lead payload")
+
+    name = lead_fields.get("full_name", lead_fields.get("first_name", "Unknown"))
+    phone = lead_fields.get("phone_number", lead_fields.get("phone", ""))
+    address = lead_fields.get("street_address", lead_fields.get("city", "Unknown"))
+    appliance = lead_fields.get("appliance", "Unknown")
+    issue = lead_fields.get("issue", lead_fields.get("description", ""))
+
+    conn = get_db_connection()
+    lead_id = None
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO leads (name, phone, address, appliance, issue, status)
+                    VALUES (%s, %s, %s, %s, %s, 'new')
+                    RETURNING id;
+                """, (name, phone, address, appliance, issue))
+                lead_id = cur.fetchone()[0]
+    except Exception as e:
+        logger.error(f"Facebook lead DB insert failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+    finally:
+        conn.close()
+
+    # ── Make.com Handoff: Facebook lead ─────────────────────────────────────────
+    _forward_to_make({
+        "event": "facebook_lead",
+        "lead_id": lead_id,
+        "lead": {
+            "name": name,
+            "phone": phone,
+            "address": address,
+            "appliance": appliance,
+            "issue": issue,
+        },
+        "raw_fields": lead_fields,
+        "company": COMPANY_NAME,
+    })
 
     return {"status": "success", "lead_id": lead_id}
 
@@ -815,14 +891,17 @@ async def check_stale_leads():
         phone = lead["phone"]
         alert_text = f"⚠️ *Stale Lead Alert!* Lead *{name}* ({phone}) has been waiting for over 30 minutes!"
         
-        if SLACK_WEBHOOK_URL:
-            try:
-                r = requests.post(SLACK_WEBHOOK_URL, json={"text": alert_text}, timeout=10)
-                logger.info(f"Stale lead alert sent for {name}. Status: {r.status_code}")
-            except Exception as e:
-                logger.error(f"Failed to post stale lead alert to Slack for {name}: {e}")
-        else:
-            logger.warning(f"SLACK_WEBHOOK_URL not configured. Alert skipped for {name}.")
+        # ── Make.com Handoff: stale lead alert ───────────────────────────────────────────
+        # Routed through Make so Slack alert formatting stays consistent with
+        # other events and Python never posts directly to SLACK_WEBHOOK_URL.
+        _forward_to_make({
+            "event": "stale_lead_alert",
+            "name": name,
+            "phone": phone,
+            "alert_text": alert_text,
+            "company": COMPANY_NAME,
+        })
+        logger.info(f"Stale lead alert forwarded to Make for {name}.")
 
 
 async def check_stale_leads_loop():
