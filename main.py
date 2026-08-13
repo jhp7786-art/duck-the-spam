@@ -27,7 +27,7 @@ if not DATABASE_URL:
     raise ValueError("DATABASE_URL environment variable is not set. Please define it in your environment or .env file.")
 SLACK_WEBHOOK_URL = os.getenv("SLACK_WEBHOOK_URL", "")
 API_SECRET_KEY = os.getenv("API_SECRET_KEY")
-COMPANY_NAME = os.getenv("COMPANY_NAME", "New Life Appliance Repair")
+COMPANY_NAME = os.getenv("COMPANY_NAME", "Jeff")
 # WEB_FORM_URL: client-specific URL sent via SMS when caller presses 2
 WEB_FORM_URL = os.getenv("WEB_FORM_URL", "")
 # MAKE_WEBHOOK_URL: central Make.com scenario endpoint that receives all forwarded payloads
@@ -318,8 +318,8 @@ async def handle_incoming_call(From: str = Form(...)):
     )
     gather.say(
         f"Thank you for calling {COMPANY_NAME}. "
-        "Press 1 to leave a voicemail. "
-        "Press 2 to receive a text message with a link to our website form."
+        "Press 1 to leave a voicemail with your name, address, appliance, and a brief description of the issue.  "
+        "Press 2 to receive a text message with a link to our website form.By leaving a message or selecting a text link, you consent to receive a text reply from us at this number."
     )
     response.append(gather)
 
@@ -740,13 +740,13 @@ async def process_slack_interaction(action_id: str, lead_id: int, response_url: 
     sms_body = None
 
     if action_id == "offer_today":
-        sms_body = f"Hi, this is {COMPANY_NAME}. We have an arrival window open today for your {lead_appliance} repair. Would you like to schedule today's arrival window? Reply YES to confirm."
+        sms_body = f"Hi, this is {COMPANY_NAME}. We have an arrival window open today for your {lead_appliance} repair. Would you like to schedule today's arrival window? Reply YES to confirm. Reply STOP to opt out."
     elif action_id == "offer_am":
-        sms_body = f"Hi, this is {COMPANY_NAME}. We have an arrival window open tomorrow morning for your {lead_appliance} repair. Would you like us to schedule you then? Reply YES to confirm."
+        sms_body = f"Hi, this is {COMPANY_NAME}. We have an arrival window open tomorrow morning for your {lead_appliance} repair. Would you like us to schedule you then? Reply YES to confirm. Reply STOP to opt out."
     elif action_id == "offer_pm":
-        sms_body = f"Hi, this is {COMPANY_NAME}. We have an arrival window open tomorrow afternoon for your {lead_appliance} repair. Would you like us to schedule you then? Reply YES to confirm."
+        sms_body = f"Hi, this is {COMPANY_NAME}. We have an arrival window open tomorrow afternoon for your {lead_appliance} repair. Would you like us to schedule you then? Reply YES to confirm. Reply STOP to opt out."
     elif action_id == "send_link":
-        sms_body = f"Hi, this is {COMPANY_NAME}. Please use this link to schedule your {lead_appliance} repair: {SCHEDULING_LINK}"
+        sms_body = f"Hi, this is {COMPANY_NAME}. Please use this link to schedule your {lead_appliance} repair: {SCHEDULING_LINK}. Reply STOP to opt out."
 
     if sms_body and lead_phone:
         if not TWILIO_PHONE_NUMBER:
