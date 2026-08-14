@@ -331,7 +331,7 @@ async def handle_incoming_call(From: str = Form(...)):
     )
     gather.say(
         f"Thank you for calling {COMPANY_NAME}. "
-        "Press 1 to confirm that you would like us to send you a text message with a link to our contact form, "
+        "Press 1 to confirm that you would like us to send you a text message from our automated messaging service with a link to our contact form, "
         "and we will get back to you as soon as possible."
     )
     response.append(gather)
