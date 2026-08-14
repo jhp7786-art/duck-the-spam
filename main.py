@@ -435,19 +435,20 @@ async def voicemail_complete(
 ) -> Response:
     """
     Fires when Twilio finishes recording (action URL) and again when transcription
-    is ready (transcribeCallback URL). We drop the first empty webhook and only
-    forward to Make.com on the second hit, which carries the transcription text.
+    is ready (transcribeCallback URL). We drop any hit that lacks the actual
+    transcription body and only forward to Make.com when TranscriptionText is present.
     The Gmail/SMTP carrier-gateway alert is preserved for VIP callers.
     """
     logger.info(f"voicemail-complete: dept={dept}, from={From}, transcription_status={TranscriptionStatus}")
 
-    # ── Drop the first (recording-complete) webhook ──────────────────────────
+    # ── Drop any webhook that doesn't carry the transcription body ───────────
     # Twilio hits this endpoint twice:
-    #   1. Immediately after recording ends (action URL) — TranscriptionStatus is None.
-    #   2. When transcription is ready (transcribeCallback) — TranscriptionStatus is set.
-    # We only want to forward the second webhook so Make.com receives the full payload.
-    if not TranscriptionStatus:
-        logger.info("voicemail-complete: first webhook (no transcription yet) — skipping Make forward.")
+    #   1. Immediately after recording ends (action URL) — TranscriptionText is absent.
+    #   2. When transcription is ready (transcribeCallback) — TranscriptionText is populated.
+    # Checking TranscriptionText directly is the safest gate: if there's no text,
+    # there's nothing meaningful to forward to Make.com.
+    if not TranscriptionText:
+        logger.info("voicemail-complete: no TranscriptionText present — skipping Make forward.")
         response = VoiceResponse()
         response.say("Thank you. Your message has been saved. Goodbye.")
         response.hangup()
