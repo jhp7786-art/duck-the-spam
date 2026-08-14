@@ -486,6 +486,23 @@ async def voicemail_complete(
 
 
 
+@app.post("/incoming-sms")
+async def handle_incoming_sms(From: str = Form(...), Body: str = Form(...)):
+    """
+    Catches SMS replies from customers and forwards them to Make.com.
+    """
+    logger.info(f"Received inbound SMS from {From}: {Body}")
+
+    _forward_to_make({
+        "event": "incoming_sms",
+        "phone": From,
+        "message": Body,
+        "company": COMPANY_NAME,
+    })
+
+    return Response(content="<Response></Response>", media_type="application/xml")
+
+
 @app.post("/new-lead")
 async def receive_new_lead(payload: LeadPayload, x_api_key: str = Header(None)):
     """
@@ -800,7 +817,16 @@ async def process_slack_interaction(action_id: str, lead_id: int, response_url: 
 
         slack_payload = {
             "replace_original": True,
-            "text": feedback_text
+            "text": feedback_text,
+            "blocks": [
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": feedback_text
+                    }
+                }
+            ]
         }
         try:
             r = requests.post(response_url, json=slack_payload, timeout=10)
