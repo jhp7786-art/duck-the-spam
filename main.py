@@ -284,7 +284,7 @@ async def handle_incoming_call(From: str = Form(...)):
             )
         response.say(greeting_text)
         response.record(max_length=120, action="/voicemail-complete?dept=vip", transcribe=True,
-                        transcribeCallback="/voicemail-complete?dept=vip")
+                        transcribeCallback="https://duck-the-spam-production.up.railway.app/voicemail-complete?dept=vip")
         return Response(content=str(response), media_type="application/xml")
 
     # ── 2. Blacklist Check (preserved) ──────────────────────────────────────
@@ -355,7 +355,7 @@ async def gather_result(
             finish_on_key="#",
             action="/voicemail-complete?dept=caller",
             transcribe=True,
-            transcribeCallback="/voicemail-complete?dept=caller",
+            transcribeCallback="https://duck-the-spam-production.up.railway.app/voicemail-complete?dept=caller",
         )
 
     elif Digits == "2":
@@ -434,11 +434,24 @@ async def voicemail_complete(
     TranscriptionStatus: str = Form(None),
 ) -> Response:
     """
-    Fires when Twilio finishes recording (and optionally transcribing) a voicemail.
-    Packages all available data into a clean dict and forwards it to Make.com.
+    Fires when Twilio finishes recording (action URL) and again when transcription
+    is ready (transcribeCallback URL). We drop the first empty webhook and only
+    forward to Make.com on the second hit, which carries the transcription text.
     The Gmail/SMTP carrier-gateway alert is preserved for VIP callers.
     """
     logger.info(f"voicemail-complete: dept={dept}, from={From}, transcription_status={TranscriptionStatus}")
+
+    # ── Drop the first (recording-complete) webhook ──────────────────────────
+    # Twilio hits this endpoint twice:
+    #   1. Immediately after recording ends (action URL) — TranscriptionStatus is None.
+    #   2. When transcription is ready (transcribeCallback) — TranscriptionStatus is set.
+    # We only want to forward the second webhook so Make.com receives the full payload.
+    if not TranscriptionStatus:
+        logger.info("voicemail-complete: first webhook (no transcription yet) — skipping Make forward.")
+        response = VoiceResponse()
+        response.say("Thank you. Your message has been saved. Goodbye.")
+        response.hangup()
+        return Response(content=str(response), media_type="application/xml")
 
     # ── VIP/cleared email alert (preserved) ─────────────────────────────────
     if dept in ["vip", "cleared"]:
@@ -464,9 +477,8 @@ async def voicemail_complete(
         except Exception as e:
             logger.error(f"Failed to send VIP/cleared SMS alert: {e}")
 
-    # ── Make.com Handoff: voicemail payload ─────────────────────────────────
-    # This is the primary handoff point for all completed voicemails.
-    # Every field Twilio sends is packaged here; Make can route/filter downstream.
+    # ── Make.com Handoff: voicemail payload (transcription webhook only) ─────
+    # Only reached on the second webhook hit, so TranscriptionText is populated.
     _forward_to_make({
         "event": "voicemail_complete",
         "dept": dept,
@@ -477,12 +489,8 @@ async def voicemail_complete(
         "company": COMPANY_NAME,
     })
 
-    # Graceful TwiML close — only needed when Twilio calls the action URL,
-    # not the transcribeCallback URL (which expects a 200 with empty body).
-    response = VoiceResponse()
-    response.say("Thank you. Your message has been saved. Goodbye.")
-    response.hangup()
-    return Response(content=str(response), media_type="application/xml")
+    # transcribeCallback expects a 200 with an empty body — no TwiML needed here.
+    return Response(status_code=200)
 
 
 
