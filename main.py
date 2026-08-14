@@ -1,4 +1,5 @@
 import os
+import io
 import json
 import hmac
 import hashlib
@@ -15,6 +16,7 @@ from twilio.request_validator import RequestValidator
 from twilio.rest import Client
 from dotenv import load_dotenv
 from pydantic import BaseModel
+from openai import OpenAI
 
 load_dotenv()
 
@@ -43,6 +45,10 @@ SLACK_SIGNING_SECRET = os.getenv("SLACK_SIGNING_SECRET", "")
 # Facebook webhook security tokens
 FACEBOOK_VERIFY_TOKEN = os.getenv("FACEBOOK_VERIFY_TOKEN", "")
 FACEBOOK_APP_SECRET = os.getenv("FACEBOOK_APP_SECRET", "")
+
+# OpenAI — used for Whisper transcription of voicemails
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+openai_client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
 async def validate_twilio_request(request: Request):
     if not TWILIO_AUTH_TOKEN:
@@ -283,8 +289,7 @@ async def handle_incoming_call(From: str = Form(...)):
                 "I am currently unavailable. Please leave a message and I will get right back to you."
             )
         response.say(greeting_text)
-        response.record(max_length=120, action="/voicemail-complete?dept=vip", transcribe=True,
-                        transcribeCallback="https://duck-the-spam-production.up.railway.app/voicemail-complete?dept=vip")
+        response.record(max_length=120, action="/voicemail-complete?dept=vip")
         return Response(content=str(response), media_type="application/xml")
 
     # ── 2. Blacklist Check (preserved) ──────────────────────────────────────
@@ -348,14 +353,12 @@ async def gather_result(
             "Please leave your message after the tone. "
             "Press the pound key or hang up when you are finished."
         )
-        # transcribeCallback fires when Twilio finishes transcribing;
-        # that webhook hit is handled by /voicemail-complete and forwarded to Make.
+        # Twilio will POST RecordingUrl to /voicemail-complete when done.
+        # Whisper transcription happens there — no Twilio transcription credits used.
         response.record(
             max_length=120,
             finish_on_key="#",
             action="/voicemail-complete?dept=caller",
-            transcribe=True,
-            transcribeCallback="https://duck-the-spam-production.up.railway.app/voicemail-complete?dept=caller",
         )
 
     elif Digits == "2":
@@ -430,29 +433,53 @@ async def voicemail_complete(
     dept: str = None,
     From: str = Form(None),
     RecordingUrl: str = Form(None),
-    TranscriptionText: str = Form(None),
-    TranscriptionStatus: str = Form(None),
 ) -> Response:
     """
-    Fires when Twilio finishes recording (action URL) and again when transcription
-    is ready (transcribeCallback URL). We drop any hit that lacks the actual
-    transcription body and only forward to Make.com when TranscriptionText is present.
+    Fires once when Twilio finishes recording (action URL).
+    Downloads the audio from Twilio, transcribes it via OpenAI Whisper,
+    and forwards a single clean payload to Make.com.
     The Gmail/SMTP carrier-gateway alert is preserved for VIP callers.
     """
-    logger.info(f"voicemail-complete: dept={dept}, from={From}, transcription_status={TranscriptionStatus}")
+    logger.info(f"voicemail-complete: dept={dept}, from={From}, recording_url={RecordingUrl}")
 
-    # ── Drop any webhook that doesn't carry the transcription body ───────────
-    # Twilio hits this endpoint twice:
-    #   1. Immediately after recording ends (action URL) — TranscriptionText is absent.
-    #   2. When transcription is ready (transcribeCallback) — TranscriptionText is populated.
-    # Checking TranscriptionText directly is the safest gate: if there's no text,
-    # there's nothing meaningful to forward to Make.com.
-    if not TranscriptionText:
-        logger.info("voicemail-complete: no TranscriptionText present — skipping Make forward.")
-        response = VoiceResponse()
-        response.say("Thank you. Your message has been saved. Goodbye.")
-        response.hangup()
-        return Response(content=str(response), media_type="application/xml")
+    # ── Download audio from Twilio ───────────────────────────────────────
+    # Twilio recording URLs require HTTP Basic Auth (SID + token) to download.
+    # We append .mp3 to get a compressed format Whisper accepts directly.
+    transcription_text = None
+    audio_bytes = None
+    if RecordingUrl:
+        try:
+            audio_url = RecordingUrl if RecordingUrl.endswith(".mp3") else RecordingUrl + ".mp3"
+            audio_resp = requests.get(
+                audio_url,
+                auth=(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN),
+                timeout=30,
+            )
+            audio_resp.raise_for_status()
+            audio_bytes = audio_resp.content
+            logger.info(f"Downloaded voicemail audio: {len(audio_bytes)} bytes from {audio_url}")
+        except Exception as e:
+            logger.error(f"Failed to download voicemail audio: {e}")
+
+    # ── Transcribe via OpenAI Whisper ──────────────────────────────────
+    # Wrap raw bytes in an in-memory file so the OpenAI SDK can stream it.
+    # The filename tells Whisper the audio codec; .mp3 is widely supported.
+    if audio_bytes and openai_client:
+        try:
+            audio_file = io.BytesIO(audio_bytes)
+            audio_file.name = "voicemail.mp3"
+            result = openai_client.audio.transcriptions.create(
+                model="whisper-1",
+                file=audio_file,
+            )
+            transcription_text = result.text
+            logger.info(f"Whisper transcription complete for lead from {From}: {transcription_text[:80]}...")
+        except Exception as e:
+            logger.error(f"Whisper transcription failed: {e}")
+            transcription_text = "[Transcription failed — listen to recording]"
+    elif not openai_client:
+        logger.warning("OPENAI_API_KEY not configured — transcription skipped")
+        transcription_text = "[Transcription unavailable — OPENAI_API_KEY not set]"
 
     # ── VIP/cleared email alert (preserved) ─────────────────────────────────
     if dept in ["vip", "cleared"]:
@@ -478,20 +505,22 @@ async def voicemail_complete(
         except Exception as e:
             logger.error(f"Failed to send VIP/cleared SMS alert: {e}")
 
-    # ── Make.com Handoff: voicemail payload (transcription webhook only) ─────
-    # Only reached on the second webhook hit, so TranscriptionText is populated.
+    # ── Make.com Handoff: single clean payload ──────────────────────────────
+    # Fired exactly once per voicemail. TranscriptionText is our own Whisper result.
     _forward_to_make({
         "event": "voicemail_complete",
         "dept": dept,
         "phone": From,
         "recording_url": RecordingUrl,
-        "transcription_text": TranscriptionText,
-        "transcription_status": TranscriptionStatus,
+        "transcription_text": transcription_text,
         "company": COMPANY_NAME,
     })
 
-    # transcribeCallback expects a 200 with an empty body — no TwiML needed here.
-    return Response(status_code=200)
+    # Return TwiML so Twilio gracefully ends the call leg.
+    response = VoiceResponse()
+    response.say("Thank you. Your message has been saved. Goodbye.")
+    response.hangup()
+    return Response(content=str(response), media_type="application/xml")
 
 
 

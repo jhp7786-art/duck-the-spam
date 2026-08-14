@@ -6,3 +6,4 @@ python-multipart
 streamlit
 pandas
 psycopg2-binary
+openai
