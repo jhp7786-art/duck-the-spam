@@ -693,7 +693,6 @@ async def facebook_lead_webhook(request: Request):
 
     return {"status": "success", "lead_id": lead_id}
 
-
 async def process_slack_interaction(action_id: str, lead_id: int, response_url: str):
     """
     Processes the interactive Slack action asynchronously to handle database status mapping,
