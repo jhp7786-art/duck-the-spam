@@ -269,22 +269,38 @@ async def handle_incoming_call(From: str = Form(...)):
         conn.close()
 
     if is_vip:
-        log_call(From, "VIP Bypass", "Routed straight to voicemail")
-        if custom_greeting and custom_greeting.strip():
-            greeting_text = custom_greeting.strip()
-        elif vip_name and vip_name.strip():
-            greeting_text = (
-                f"Hey {vip_name.strip()}, thanks for calling {COMPANY_NAME}. "
-                "I am currently unavailable. Please leave a message and I will get right back to you."
-            )
+        log_call(From, "VIP", "Sending web-form SMS to VIP caller")
+        sms_body = (
+            f"Hi {vip_name or COMPANY_NAME}, thanks for calling {COMPANY_NAME}. "
+            f"Please fill out our contact form here: {WEB_FORM_URL}. "
+            "Reply STOP to unsubscribe."
+        )
+        if TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN and TWILIO_PHONE_NUMBER:
+            try:
+                twilio_client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+                twilio_client.messages.create(
+                    body=sms_body,
+                    from_=TWILIO_PHONE_NUMBER,
+                    to=From,
+                )
+                logger.info(f"Web-form SMS sent to VIP {From}")
+            except Exception as e:
+                logger.error(f"Failed to send web-form SMS to VIP {From}: {e}")
         else:
-            greeting_text = (
-                f"Hey, thanks for calling {COMPANY_NAME}. "
-                "I am currently unavailable. Please leave a message and I will get right back to you."
-            )
-        response.say(greeting_text)
-        response.record(max_length=120, action="/voicemail-complete?dept=vip", transcribe=True,
-                        transcribeCallback="/voicemail-transcription?dept=vip")
+            logger.warning("Twilio credentials not fully configured — VIP SMS skipped")
+
+        _forward_to_make({
+            "event": "sms_link_sent",
+            "phone": From,
+            "company": COMPANY_NAME,
+            "web_form_url": WEB_FORM_URL,
+        })
+
+        response.say(
+            f"Thank you for calling {COMPANY_NAME}. "
+            "We are sending a text message to your number now with a link to our contact form. Goodbye."
+        )
+        response.hangup()
         return Response(content=str(response), media_type="application/xml")
 
     # ── 2. Blacklist Check (preserved) ──────────────────────────────────────
@@ -305,9 +321,6 @@ async def handle_incoming_call(From: str = Form(...)):
         return Response(content=str(response), media_type="application/xml")
 
     # ── 3. DTMF Gather Menu ──────────────────────────────────────────────────
-    # This Gather replaces ALL previous speech-analysis/spam-trap logic.
-    # numDigits=1 captures a single keypress; timeout=5 gives the caller
-    # time to respond before Twilio falls through to the hangup below.
     log_call(From, "Inbound", "Presented DTMF menu")
     gather = Gather(
         input="dtmf",
@@ -318,8 +331,8 @@ async def handle_incoming_call(From: str = Form(...)):
     )
     gather.say(
         f"Thank you for calling {COMPANY_NAME}. "
-        "Press 1 to leave a voicemail with your name, address, appliance, and a brief description of the issue.  "
-        "Press 2 to receive a text message with a link to our website form.By leaving a message or selecting a text link, you consent to receive a text reply from us at this number."
+        "Press 1 to confirm that you would like us to send you a text message with a link to our contact form, "
+        "and we will get back to you as soon as possible."
     )
     response.append(gather)
 
@@ -336,35 +349,17 @@ async def gather_result(
 ) -> Response:
     """
     Handles the DTMF keypress from /incoming-call's Gather block.
-      1 → record a transcribed voicemail (forwarded to Make on completion)
-      2 → send an SMS containing WEB_FORM_URL and hang up
+      1 → send an SMS containing WEB_FORM_URL and hang up
     """
     response = VoiceResponse()
 
     if Digits == "1":
-        # ── Option 1: Voicemail ──────────────────────────────────────────────
-        log_call(From, "Voicemail", "Caller chose to leave a voicemail")
-        response.say(
-            "Please leave your message after the tone. "
-            "Press the pound key or hang up when you are finished."
-        )
-        # action URL fires immediately after recording ends → /voicemail-complete (TwiML hangup).
-        # transcribeCallback fires later when transcription is ready → /voicemail-transcription (Make forward).
-        response.record(
-            max_length=120,
-            finish_on_key="#",
-            action="/voicemail-complete?dept=caller",
-            transcribe=True,
-            transcribeCallback="/voicemail-transcription?dept=caller",
-        )
-
-    elif Digits == "2":
-        # ── Option 2: SMS web-form link ──────────────────────────────────────
+        # ── Option 1: SMS web-form link ──────────────────────────────────────
         # SMS body driven entirely by env vars so it is safe to clone per client.
-        log_call(From, "SMS Link", "Caller requested web form link via SMS")
+        log_call(From, "SMS Link", "Caller confirmed web form SMS")
         sms_body = (
             f"Hi, this is {COMPANY_NAME}. "
-            f"Please fill out our request form here: {WEB_FORM_URL}. "
+            f"Please fill out our contact form here: {WEB_FORM_URL}. "
             "Reply STOP to unsubscribe."
         )
         if TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN and TWILIO_PHONE_NUMBER:
@@ -397,7 +392,7 @@ async def gather_result(
         response.hangup()
 
     else:
-        # Unrecognised keypress
+        # Unrecognised keypress or no valid option
         log_call(From, "Invalid Input", f"Caller pressed: {Digits}")
         response.say("That was not a valid option. Please call back and try again. Goodbye.")
         response.hangup()
@@ -423,83 +418,6 @@ def _forward_to_make(payload: dict) -> None:
     except Exception as e:
         logger.error(f"Make webhook forward failed: {e}")
 
-
-
-@app.post("/voicemail-complete", dependencies=[Depends(validate_twilio_request)])
-async def voicemail_complete(
-    dept: str = None,
-    From: str = Form(None),
-    RecordingUrl: str = Form(None),
-) -> Response:
-    """
-    Fires immediately when Twilio finishes recording (action URL).
-    Handles the VIP/cleared email alert and returns a graceful TwiML hangup.
-    Make.com forwarding happens separately in /voicemail-transcription once
-    Twilio's async transcription is ready.
-    """
-    logger.info(f"voicemail-complete: dept={dept}, from={From}, recording_url={RecordingUrl}")
-
-    # ── VIP/cleared email alert (preserved) ─────────────────────────────────
-    if dept in ["vip", "cleared"]:
-        try:
-            if dept == "vip":
-                subject = f"{COMPANY_NAME} - VIP Call Alert"
-                content = f"\U0001f534 VIP Caller {From} left a message. Listen: {RecordingUrl}"
-            else:
-                subject = f"{COMPANY_NAME} - Cleared Call Alert"
-                content = f"\U0001f7e2 Cleared Caller {From} left a message. Listen: {RecordingUrl}"
-
-            msg = EmailMessage()
-            msg.set_content(content)
-            msg["Subject"] = subject
-            msg["From"] = GMAIL_ADDRESS
-            msg["To"] = CARRIER_GATEWAY
-
-            server = smtplib.SMTP("smtp.gmail.com", 587)
-            server.starttls()
-            server.login(GMAIL_ADDRESS, GMAIL_APP_PASSWORD)
-            server.send_message(msg)
-            server.quit()
-        except Exception as e:
-            logger.error(f"Failed to send VIP/cleared SMS alert: {e}")
-
-    # Graceful TwiML close — ends the call leg cleanly.
-    response = VoiceResponse()
-    response.say("Thank you. Your message has been saved. Goodbye.")
-    response.hangup()
-    return Response(content=str(response), media_type="application/xml")
-
-
-@app.post("/voicemail-transcription", dependencies=[Depends(validate_twilio_request)])
-async def voicemail_transcription(
-    dept: str = None,
-    From: str = Form(None),
-    RecordingUrl: str = Form(None),
-    TranscriptionText: str = Form(None),
-    TranscriptionStatus: str = Form(None),
-) -> Response:
-    """
-    Fires asynchronously when Twilio finishes transcribing a voicemail (transcribeCallback).
-    Receives the completed TranscriptionText alongside RecordingUrl and From,
-    then forwards a single clean payload to Make.com.
-    """
-    logger.info(f"voicemail-transcription: dept={dept}, from={From}, transcription_status={TranscriptionStatus}")
-
-    # ── Make.com Handoff: full voicemail payload ─────────────────────────────
-    # This is the single forwarding point — called only after Twilio transcribes,
-    # so TranscriptionText is always populated here.
-    _forward_to_make({
-        "event": "voicemail_complete",
-        "dept": dept,
-        "phone": From,
-        "recording_url": RecordingUrl,
-        "transcription_text": TranscriptionText,
-        "transcription_status": TranscriptionStatus,
-        "company": COMPANY_NAME,
-    })
-
-    # transcribeCallback expects a plain 200 — no TwiML body required.
-    return Response(status_code=200)
 
 
 
